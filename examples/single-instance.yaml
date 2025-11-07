@@ -1,0 +1,37 @@
+# Example: Single K3s Instance Configuration
+#
+# This is a basic configuration for deploying a single k3s instance
+# using NodePort access method
+
+# Instance configuration
+instance:
+  name: dev
+  namespace: k3s-dev
+
+# K3s version (optional - defaults to latest stable)
+k3s:
+  version: v1.31.5-k3s1
+
+# Storage configuration
+storage:
+  size: 10Gi
+  # Leave storageClass empty to use cluster default
+  storageClass: ""
+
+# Resource limits
+resources:
+  cpu:
+    limit: "2"
+    request: "1"
+  memory:
+    limit: 4Gi
+    request: 2Gi
+
+# Access method: nodeport
+access:
+  method: nodeport
+  nodeport:
+    port: 30443
+
+# Usage:
+#   ./install.sh --config examples/single-instance.yaml

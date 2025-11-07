@@ -1,0 +1,44 @@
+# Example: K3s Instance with LoadBalancer Access
+#
+# This configuration uses LoadBalancer for access, ideal for cloud environments
+
+instance:
+  name: staging
+  namespace: k3s-staging
+
+k3s:
+  version: v1.31.5-k3s1
+
+storage:
+  size: 20Gi
+  storageClass: ""
+
+resources:
+  cpu:
+    limit: "3"
+    request: "1.5"
+  memory:
+    limit: 6Gi
+    request: 3Gi
+
+# Access via LoadBalancer
+access:
+  method: loadbalancer
+  # Cloud-specific annotations can be added here
+  loadbalancer:
+    annotations:
+      # AWS Example:
+      # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      # service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+
+      # GCP Example:
+      # cloud.google.com/load-balancer-type: "Internal"
+
+      # Azure Example:
+      # service.beta.kubernetes.io/azure-load-balancer-internal: "false"
+
+# Usage:
+#   ./install.sh --config examples/loadbalancer.yaml
+#
+# After deployment, get the external IP:
+#   kubectl get svc -n k3s-staging k3s-loadbalancer

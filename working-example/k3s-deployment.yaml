@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k3s-data
+  namespace: k3s-inner
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: microk8s-hostpath
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k3s
+  namespace: k3s-inner
+  labels:
+    app: k3s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k3s
+  template:
+    metadata:
+      labels:
+        app: k3s
+    spec:
+      containers:
+      - name: dind
+        image: docker:dind
+        command:
+          - dockerd
+          - --host=unix:///var/run/docker.sock
+          - --host=tcp://0.0.0.0:2375
+        env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: docker-storage
+          mountPath: /var/lib/docker
+        - name: docker-sock
+          mountPath: /var/run
+      - name: k3d
+        image: ghcr.io/k3d-io/k3d:latest
+        command:
+          - /bin/sh
+          - -c
+        args:
+          - |
+            sleep 15
+            k3d cluster create inner \
+              --api-port 0.0.0.0:6443 \
+              --servers 1 \
+              --agents 0 \
+              --wait \
+              --timeout 5m \
+              --k3s-arg "--tls-san=k3s.local@server:0" \
+              --k3s-arg "--tls-san=k3s-service@server:0" \
+              --k3s-arg "--tls-san=k3s-service.k3s-inner.svc.cluster.local@server:0" \
+              --k3s-arg "--tls-san=127.0.0.1@server:0" \
+              --k3s-arg "--tls-san=localhost@server:0" \
+              --k3s-arg "--disable=traefik@server:0" \
+              --k3s-arg "--disable=servicelb@server:0"
+            k3d kubeconfig get inner > /output/kubeconfig.yaml
+            chmod 666 /output/kubeconfig.yaml
+            echo "K3s cluster ready!"
+            # Forward port from docker container to pod network
+            socat TCP-LISTEN:6444,fork,reuseaddr TCP:localhost:6443 &
+            tail -f /dev/null
+        env:
+        - name: DOCKER_HOST
+          value: tcp://localhost:2375
+        ports:
+        - containerPort: 6443
+          name: api
+          protocol: TCP
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run
+        - name: k3s-config
+          mountPath: /output
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - test -f /output/kubeconfig.yaml
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: docker-storage
+        emptyDir: {}
+      - name: docker-sock
+        emptyDir: {}
+      - name: k3s-config
+        emptyDir: {}

@@ -1,0 +1,757 @@
+#!/usr/bin/env bash
+
+#############################################################################
+# K3s-in-Kubernetes Installer
+#
+# Deploys a k3s cluster inside an existing Kubernetes cluster with external
+# kubectl access via NodePort, LoadBalancer, or Ingress.
+#
+# Usage:
+#   ./install.sh --name mydev [options]
+#   ./install.sh --config config.yaml
+#   ./install.sh --batch instances.yaml
+#############################################################################
+
+set -euo pipefail
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATES_DIR="${SCRIPT_DIR}/templates"
+KUBECONFIGS_DIR="${SCRIPT_DIR}/kubeconfigs"
+
+# Default values
+INSTANCE_NAME=""
+NAMESPACE=""
+K3S_VERSION="v1.31.5-k3s1"
+STORAGE_SIZE="10Gi"
+STORAGE_CLASS=""
+ACCESS_METHOD="nodeport"
+NODEPORT="30443"
+INGRESS_HOSTNAME=""
+INGRESS_CLASS="nginx"
+CPU_LIMIT="2"
+MEMORY_LIMIT="4Gi"
+CPU_REQUEST="1"
+MEMORY_REQUEST="2Gi"
+CONFIG_FILE=""
+BATCH_FILE=""
+DRY_RUN=false
+VERBOSE=false
+WAIT_TIMEOUT=300
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+#############################################################################
+# Utility Functions
+#############################################################################
+
+log() {
+    echo -e "${BLUE}[INFO]${NC} $*"
+}
+
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $*"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $*"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $*" >&2
+}
+
+fatal() {
+    error "$*"
+    exit 1
+}
+
+debug() {
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo -e "${BLUE}[DEBUG]${NC} $*"
+    fi
+}
+
+#############################################################################
+# Prerequisites Check
+#############################################################################
+
+check_prerequisites() {
+    log "Checking prerequisites..."
+
+    # Check kubectl
+    if ! command -v kubectl &> /dev/null; then
+        fatal "kubectl is not installed or not in PATH"
+    fi
+
+    # Check kubectl connectivity
+    if ! kubectl cluster-info &> /dev/null; then
+        fatal "Cannot connect to Kubernetes cluster. Check your kubeconfig."
+    fi
+
+    # Check for required permissions
+    if ! kubectl auth can-i create namespaces &> /dev/null; then
+        fatal "Insufficient permissions: cannot create namespaces"
+    fi
+
+    # Check for storageclass if not specified
+    if [[ -z "$STORAGE_CLASS" ]]; then
+        if ! kubectl get storageclass -o name &> /dev/null | grep -q .; then
+            fatal "No storage class found. Please specify --storage-class or create a default storage class."
+        fi
+    fi
+
+    success "Prerequisites check passed"
+}
+
+#############################################################################
+# Configuration Parsing
+#############################################################################
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --name)
+                INSTANCE_NAME="$2"
+                shift 2
+                ;;
+            --namespace)
+                NAMESPACE="$2"
+                shift 2
+                ;;
+            --k3s-version)
+                K3S_VERSION="$2"
+                shift 2
+                ;;
+            --storage-size)
+                STORAGE_SIZE="$2"
+                shift 2
+                ;;
+            --storage-class)
+                STORAGE_CLASS="$2"
+                shift 2
+                ;;
+            --access-method)
+                ACCESS_METHOD="$2"
+                shift 2
+                ;;
+            --nodeport)
+                NODEPORT="$2"
+                shift 2
+                ;;
+            --ingress-hostname)
+                INGRESS_HOSTNAME="$2"
+                shift 2
+                ;;
+            --ingress-class)
+                INGRESS_CLASS="$2"
+                shift 2
+                ;;
+            --cpu-limit)
+                CPU_LIMIT="$2"
+                shift 2
+                ;;
+            --memory-limit)
+                MEMORY_LIMIT="$2"
+                shift 2
+                ;;
+            --cpu-request)
+                CPU_REQUEST="$2"
+                shift 2
+                ;;
+            --memory-request)
+                MEMORY_REQUEST="$2"
+                shift 2
+                ;;
+            --config)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            --batch)
+                BATCH_FILE="$2"
+                shift 2
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --wait-timeout)
+                WAIT_TIMEOUT="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            *)
+                fatal "Unknown option: $1"
+                ;;
+        esac
+    done
+}
+
+show_usage() {
+    cat << EOF
+Usage: $0 --name <instance-name> [options]
+
+Required:
+  --name NAME                Instance name (e.g., 'dev', 'staging')
+
+Optional:
+  --namespace NAMESPACE      Kubernetes namespace (default: k3s-<name>)
+  --k3s-version VERSION      K3s version (default: ${K3S_VERSION})
+  --storage-size SIZE        PVC size (default: ${STORAGE_SIZE})
+  --storage-class CLASS      Storage class name (default: cluster default)
+
+Access Method:
+  --access-method METHOD     Access method: nodeport|loadbalancer|ingress (default: nodeport)
+  --nodeport PORT           NodePort number (default: ${NODEPORT}, range: 30000-32767)
+  --ingress-hostname HOST   Hostname for Ingress (required if using ingress)
+  --ingress-class CLASS     Ingress class (default: ${INGRESS_CLASS})
+
+Resources:
+  --cpu-limit CPU           CPU limit (default: ${CPU_LIMIT})
+  --memory-limit MEM        Memory limit (default: ${MEMORY_LIMIT})
+  --cpu-request CPU         CPU request (default: ${CPU_REQUEST})
+  --memory-request MEM      Memory request (default: ${MEMORY_REQUEST})
+
+Advanced:
+  --config FILE             Load configuration from YAML file
+  --batch FILE              Install multiple instances from file
+  --dry-run                 Generate manifests without applying
+  --verbose                 Enable verbose output
+  --wait-timeout SECONDS    Wait timeout for pod ready (default: ${WAIT_TIMEOUT})
+  -h, --help                Show this help message
+
+Examples:
+  # Quick start with defaults
+  $0 --name dev
+
+  # Custom configuration
+  $0 --name staging --nodeport 30444 --storage-size 20Gi
+
+  # Using LoadBalancer
+  $0 --name prod --access-method loadbalancer
+
+  # Using Ingress
+  $0 --name dev --access-method ingress --ingress-hostname k3s-dev.example.com
+
+  # From config file
+  $0 --config examples/single-instance.yaml
+
+  # Batch installation
+  $0 --batch examples/multi-instance.yaml
+
+EOF
+}
+
+validate_config() {
+    if [[ -z "$INSTANCE_NAME" ]]; then
+        fatal "Instance name is required. Use --name or --config"
+    fi
+
+    # Set default namespace if not specified
+    if [[ -z "$NAMESPACE" ]]; then
+        NAMESPACE="k3s-${INSTANCE_NAME}"
+    fi
+
+    # Validate access method
+    case "$ACCESS_METHOD" in
+        nodeport)
+            if [[ ! "$NODEPORT" =~ ^[0-9]+$ ]] || [[ "$NODEPORT" -lt 30000 ]] || [[ "$NODEPORT" -gt 32767 ]]; then
+                fatal "NodePort must be between 30000 and 32767"
+            fi
+            ;;
+        ingress)
+            if [[ -z "$INGRESS_HOSTNAME" ]]; then
+                fatal "Ingress hostname is required when using ingress access method"
+            fi
+            ;;
+        loadbalancer)
+            # No additional validation needed
+            ;;
+        *)
+            fatal "Invalid access method: $ACCESS_METHOD. Must be nodeport, loadbalancer, or ingress"
+            ;;
+    esac
+
+    debug "Configuration validated:"
+    debug "  Instance: $INSTANCE_NAME"
+    debug "  Namespace: $NAMESPACE"
+    debug "  Access Method: $ACCESS_METHOD"
+}
+
+#############################################################################
+# Manifest Generation
+#############################################################################
+
+generate_namespace() {
+    cat <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app: k3s-nested
+    instance: ${INSTANCE_NAME}
+EOF
+}
+
+generate_pvc() {
+    local storage_class_line=""
+    if [[ -n "$STORAGE_CLASS" ]]; then
+        storage_class_line="  storageClassName: ${STORAGE_CLASS}"
+    fi
+
+    cat <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k3s-data
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${STORAGE_SIZE}
+${storage_class_line}
+EOF
+}
+
+generate_deployment() {
+    cat <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k3s
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k3s
+      instance: ${INSTANCE_NAME}
+  template:
+    metadata:
+      labels:
+        app: k3s
+        instance: ${INSTANCE_NAME}
+    spec:
+      containers:
+      - name: dind
+        image: docker:dind
+        command:
+          - dockerd
+          - --host=unix:///var/run/docker.sock
+          - --host=tcp://0.0.0.0:2375
+        env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+        securityContext:
+          privileged: true
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: "500m"
+            memory: 1Gi
+        volumeMounts:
+        - name: docker-storage
+          mountPath: /var/lib/docker
+        - name: docker-sock
+          mountPath: /var/run
+      - name: k3d
+        image: ghcr.io/k3d-io/k3d:latest
+        command:
+          - /bin/sh
+          - -c
+        args:
+          - |
+            sleep 15
+            k3d cluster create ${INSTANCE_NAME} \\
+              --api-port 0.0.0.0:6443 \\
+              --servers 1 \\
+              --agents 0 \\
+              --wait \\
+              --timeout 5m \\
+              --k3s-arg "--tls-san=${INSTANCE_NAME}@server:0" \\
+              --k3s-arg "--tls-san=k3s-service@server:0" \\
+              --k3s-arg "--tls-san=k3s-service.${NAMESPACE}.svc.cluster.local@server:0" \\
+              --k3s-arg "--tls-san=127.0.0.1@server:0" \\
+              --k3s-arg "--tls-san=localhost@server:0" \\
+              --k3s-arg "--disable=traefik@server:0" \\
+              --k3s-arg "--disable=servicelb@server:0" \\
+              --k3s-image=rancher/k3s:${K3S_VERSION}
+            k3d kubeconfig get ${INSTANCE_NAME} > /output/kubeconfig.yaml
+            chmod 666 /output/kubeconfig.yaml
+            echo "K3s cluster '${INSTANCE_NAME}' is ready!"
+            tail -f /dev/null
+        env:
+        - name: DOCKER_HOST
+          value: tcp://localhost:2375
+        ports:
+        - containerPort: 6443
+          name: api
+          protocol: TCP
+        resources:
+          limits:
+            cpu: "${CPU_LIMIT}"
+            memory: ${MEMORY_LIMIT}
+          requests:
+            cpu: "${CPU_REQUEST}"
+            memory: ${MEMORY_REQUEST}
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run
+        - name: k3s-config
+          mountPath: /output
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - test -f /output/kubeconfig.yaml
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: docker-storage
+        emptyDir: {}
+      - name: docker-sock
+        emptyDir: {}
+      - name: k3s-config
+        emptyDir: {}
+EOF
+}
+
+generate_service_nodeport() {
+    cat <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: k3s-nodeport
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+spec:
+  type: NodePort
+  selector:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+  ports:
+  - name: api
+    port: 6443
+    targetPort: 6443
+    protocol: TCP
+    nodePort: ${NODEPORT}
+EOF
+}
+
+generate_service_loadbalancer() {
+    cat <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: k3s-loadbalancer
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+spec:
+  type: LoadBalancer
+  selector:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+  ports:
+  - name: api
+    port: 6443
+    targetPort: 6443
+    protocol: TCP
+EOF
+}
+
+generate_service_clusterip() {
+    cat <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: k3s-service
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+spec:
+  type: ClusterIP
+  selector:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+  ports:
+  - name: api
+    port: 6443
+    targetPort: 6443
+    protocol: TCP
+EOF
+}
+
+generate_ingress() {
+    cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k3s-ingress
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+spec:
+  ingressClassName: ${INGRESS_CLASS}
+  rules:
+  - host: ${INGRESS_HOSTNAME}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: k3s-service
+            port:
+              number: 6443
+EOF
+}
+
+#############################################################################
+# Deployment Functions
+#############################################################################
+
+deploy_instance() {
+    log "Deploying k3s instance '${INSTANCE_NAME}' in namespace '${NAMESPACE}'..."
+
+    # Create temporary manifest file
+    local manifest_file=$(mktemp)
+
+    # Generate all manifests
+    {
+        generate_namespace
+        echo "---"
+        generate_pvc
+        echo "---"
+        generate_deployment
+        echo "---"
+        generate_service_clusterip
+        echo "---"
+
+        case "$ACCESS_METHOD" in
+            nodeport)
+                generate_service_nodeport
+                ;;
+            loadbalancer)
+                generate_service_loadbalancer
+                ;;
+            ingress)
+                generate_service_clusterip  # Still need ClusterIP for ingress backend
+                echo "---"
+                generate_ingress
+                ;;
+        esac
+    } > "$manifest_file"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "Dry run mode - manifests:"
+        cat "$manifest_file"
+        rm "$manifest_file"
+        return 0
+    fi
+
+    # Apply manifests
+    if kubectl apply -f "$manifest_file"; then
+        success "Manifests applied successfully"
+    else
+        error "Failed to apply manifests"
+        rm "$manifest_file"
+        return 1
+    fi
+
+    rm "$manifest_file"
+
+    # Wait for pod to be ready
+    wait_for_pod
+
+    # Extract kubeconfig
+    extract_kubeconfig
+
+    # Display success message
+    show_success_message
+}
+
+wait_for_pod() {
+    log "Waiting for k3s pod to be ready (timeout: ${WAIT_TIMEOUT}s)..."
+
+    local elapsed=0
+    local interval=5
+
+    while [[ $elapsed -lt $WAIT_TIMEOUT ]]; do
+        local status=$(kubectl get pods -n "$NAMESPACE" -l "app=k3s,instance=${INSTANCE_NAME}" \
+            -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
+
+        local ready=$(kubectl get pods -n "$NAMESPACE" -l "app=k3s,instance=${INSTANCE_NAME}" \
+            -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+
+        if [[ "$status" == "Running" && "$ready" == "True" ]]; then
+            success "Pod is ready!"
+            return 0
+        fi
+
+        debug "Pod status: $status, Ready: $ready"
+        sleep $interval
+        elapsed=$((elapsed + interval))
+    done
+
+    error "Timeout waiting for pod to be ready"
+    kubectl get pods -n "$NAMESPACE" -l "app=k3s,instance=${INSTANCE_NAME}"
+    kubectl describe pod -n "$NAMESPACE" -l "app=k3s,instance=${INSTANCE_NAME}"
+    return 1
+}
+
+extract_kubeconfig() {
+    log "Extracting kubeconfig..."
+
+    mkdir -p "$KUBECONFIGS_DIR"
+    local kubeconfig_file="${KUBECONFIGS_DIR}/k3s-${INSTANCE_NAME}.yaml"
+
+    # Get pod name
+    local pod_name=$(kubectl get pods -n "$NAMESPACE" -l "app=k3s,instance=${INSTANCE_NAME}" \
+        -o jsonpath='{.items[0].metadata.name}')
+
+    if [[ -z "$pod_name" ]]; then
+        error "Could not find pod"
+        return 1
+    fi
+
+    # Extract kubeconfig from pod
+    kubectl exec -n "$NAMESPACE" "$pod_name" -c k3d -- cat /output/kubeconfig.yaml > "${kubeconfig_file}.tmp"
+
+    # Modify server URL based on access method
+    case "$ACCESS_METHOD" in
+        nodeport)
+            sed "s|https://0.0.0.0:6443|https://localhost:${NODEPORT}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            ;;
+        loadbalancer)
+            # Wait for external IP
+            log "Waiting for LoadBalancer external IP..."
+            local external_ip=""
+            for i in {1..60}; do
+                external_ip=$(kubectl get svc -n "$NAMESPACE" k3s-loadbalancer \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+                if [[ -n "$external_ip" && "$external_ip" != "null" ]]; then
+                    break
+                fi
+                sleep 2
+            done
+
+            if [[ -z "$external_ip" ]]; then
+                warn "Could not get LoadBalancer IP. Please update kubeconfig manually."
+                cp "${kubeconfig_file}.tmp" "$kubeconfig_file"
+            else
+                sed "s|https://0.0.0.0:6443|https://${external_ip}:6443|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            fi
+            ;;
+        ingress)
+            sed "s|https://0.0.0.0:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            ;;
+    esac
+
+    rm "${kubeconfig_file}.tmp"
+
+    success "Kubeconfig saved to: $kubeconfig_file"
+
+    # Test connection
+    if kubectl --kubeconfig="$kubeconfig_file" cluster-info &>/dev/null; then
+        success "Successfully verified connection to inner k3s cluster"
+    else
+        warn "Could not verify connection to inner k3s cluster. It may take a moment to be fully ready."
+    fi
+}
+
+show_success_message() {
+    echo ""
+    success "═══════════════════════════════════════════════════════════"
+    success "  K3s instance '${INSTANCE_NAME}' deployed successfully!"
+    success "═══════════════════════════════════════════════════════════"
+    echo ""
+    log "Instance Details:"
+    log "  Name:       ${INSTANCE_NAME}"
+    log "  Namespace:  ${NAMESPACE}"
+    log "  Access:     ${ACCESS_METHOD}"
+
+    case "$ACCESS_METHOD" in
+        nodeport)
+            log "  URL:        https://localhost:${NODEPORT}"
+            ;;
+        loadbalancer)
+            local external_ip=$(kubectl get svc -n "$NAMESPACE" k3s-loadbalancer \
+                -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+            log "  External IP: ${external_ip}"
+            ;;
+        ingress)
+            log "  Hostname:   ${INGRESS_HOSTNAME}"
+            ;;
+    esac
+
+    echo ""
+    log "To access your k3s cluster:"
+    echo ""
+    echo "  export KUBECONFIG=${KUBECONFIGS_DIR}/k3s-${INSTANCE_NAME}.yaml"
+    echo "  kubectl get nodes"
+    echo ""
+    log "Or use the management script:"
+    echo ""
+    echo "  ./manage.sh access ${INSTANCE_NAME}"
+    echo ""
+}
+
+#############################################################################
+# Main Execution
+#############################################################################
+
+main() {
+    # Parse arguments
+    parse_args "$@"
+
+    # Handle batch mode
+    if [[ -n "$BATCH_FILE" ]]; then
+        fatal "Batch mode not yet implemented. Please install instances individually."
+    fi
+
+    # Validate configuration
+    validate_config
+
+    # Check prerequisites
+    check_prerequisites
+
+    # Deploy instance
+    deploy_instance
+}
+
+# Run main function
+main "$@"

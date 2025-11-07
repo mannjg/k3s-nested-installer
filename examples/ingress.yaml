@@ -1,0 +1,61 @@
+# Example: K3s Instance with Ingress Access
+#
+# This configuration uses Ingress for hostname-based routing
+# Requires: Ingress controller with SSL passthrough support
+
+instance:
+  name: prod
+  namespace: k3s-prod
+
+k3s:
+  version: v1.31.5-k3s1
+
+storage:
+  size: 50Gi
+  storageClass: "fast-ssd"  # Use high-performance storage for production
+
+resources:
+  cpu:
+    limit: "4"
+    request: "2"
+  memory:
+    limit: 8Gi
+    request: 4Gi
+
+# Access via Ingress
+access:
+  method: ingress
+  ingress:
+    hostname: k3s-prod.example.com
+    ingressClass: nginx
+    annotations:
+      # Required for K8s API access through ingress
+      nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+
+      # Optional: Rate limiting
+      # nginx.ingress.kubernetes.io/limit-rps: "100"
+
+      # Optional: Custom timeout
+      # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      # nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+# Prerequisites:
+#   1. Ingress controller with SSL passthrough enabled
+#   2. DNS record pointing k3s-prod.example.com to ingress controller IP
+#   3. For nginx-ingress, enable SSL passthrough:
+#      --enable-ssl-passthrough=true in controller args
+
+# Setup DNS:
+#   # Get ingress controller IP
+#   INGRESS_IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+#
+#   # Add to /etc/hosts for testing
+#   echo "$INGRESS_IP k3s-prod.example.com" | sudo tee -a /etc/hosts
+#
+#   # Or create DNS A record
+#   k3s-prod.example.com -> $INGRESS_IP
+
+# Usage:
+#   ./install.sh --config examples/ingress.yaml
