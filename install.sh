@@ -303,6 +303,10 @@ metadata:
   labels:
     app: k3s-nested
     instance: ${INSTANCE_NAME}
+    # PodSecurity labels: Allow privileged pods (required for Docker-in-Docker)
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
 EOF
 }
 

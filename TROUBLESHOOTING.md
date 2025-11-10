@@ -100,15 +100,38 @@ kubectl describe pod -n k3s-dev -l app=k3s
    ./install.sh --name dev --k3s-version v1.31.5-k3s1
    ```
 
-3. **Privileged pods not allowed**
-   ```bash
-   # Check pod security policies
-   kubectl get psp
+3. **Privileged pods not allowed / PodSecurity warnings**
 
-   # For OpenShift, add SecurityContextConstraints
+   **Symptoms**: Warnings about PodSecurity violations or pods failing to start with privilege errors.
+
+   **Why privileged access is needed**: Docker-in-Docker (DinD) requires privileged mode to run the Docker daemon, which needs kernel-level access for container management.
+
+   **Solution**: The installer automatically sets namespace labels to allow privileged pods:
+   ```bash
+   # Check namespace labels
+   kubectl get namespace k3s-dev -o yaml | grep pod-security
+
+   # Should see:
+   # pod-security.kubernetes.io/enforce: privileged
+   # pod-security.kubernetes.io/audit: privileged
+   # pod-security.kubernetes.io/warn: privileged
+   ```
+
+   **For existing namespaces**, add labels manually:
+   ```bash
+   kubectl label namespace k3s-dev \
+     pod-security.kubernetes.io/enforce=privileged \
+     pod-security.kubernetes.io/audit=privileged \
+     pod-security.kubernetes.io/warn=privileged
+   ```
+
+   **For OpenShift**, add SecurityContextConstraints:
+   ```bash
    oc adm policy add-scc-to-user privileged \
      -z default -n k3s-dev
    ```
+
+   **Note**: If your cluster enforces PodSecurity at the cluster level via admission controllers, you may need to work with cluster administrators to allow privileged workloads in your namespace.
 
 ### Pod CrashLoopBackOff
 
