@@ -684,7 +684,7 @@ extract_kubeconfig() {
     # Modify server URL based on access method
     case "$ACCESS_METHOD" in
         nodeport)
-            sed "s|https://0.0.0.0:6443|https://localhost:${NODEPORT}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            sed "s|https://[^:]*:6443|https://localhost:${NODEPORT}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
             ;;
         loadbalancer)
             # Wait for external IP
@@ -703,11 +703,11 @@ extract_kubeconfig() {
                 warn "Could not get LoadBalancer IP. Please update kubeconfig manually."
                 cp "${kubeconfig_file}.tmp" "$kubeconfig_file"
             else
-                sed "s|https://localhost:6443|https://${external_ip}:6443|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+                sed "s|https://[^:]*:6443|https://${external_ip}:6443|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
             fi
             ;;
         ingress)
-            sed "s|https://0.0.0.0:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            sed "s|https://[^:]*:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
             ;;
     esac
 

@@ -168,18 +168,18 @@ cmd_refresh_kubeconfig() {
     # Determine access method and update server URL
     if kubectl get svc -n "$namespace" k3s-nodeport &>/dev/null; then
         local nodeport=$(kubectl get svc -n "$namespace" k3s-nodeport -o jsonpath='{.spec.ports[0].nodePort}')
-        sed "s|https://localhost:6443|https://localhost:${nodeport}|g" "${kubeconfig}.tmp" > "$kubeconfig"
+        sed "s|https://[^:]*:6443|https://localhost:${nodeport}|g" "${kubeconfig}.tmp" > "$kubeconfig"
     elif kubectl get svc -n "$namespace" k3s-loadbalancer &>/dev/null; then
         local lb_ip=$(kubectl get svc -n "$namespace" k3s-loadbalancer -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
         if [[ -n "$lb_ip" && "$lb_ip" != "null" ]]; then
-            sed "s|https://localhost:6443|https://${lb_ip}:6443|g" "${kubeconfig}.tmp" > "$kubeconfig"
+            sed "s|https://[^:]*:6443|https://${lb_ip}:6443|g" "${kubeconfig}.tmp" > "$kubeconfig"
         else
             warn "LoadBalancer IP not yet assigned"
             cp "${kubeconfig}.tmp" "$kubeconfig"
         fi
     elif kubectl get ingress -n "$namespace" k3s-ingress &>/dev/null; then
         local hostname=$(kubectl get ingress -n "$namespace" k3s-ingress -o jsonpath='{.spec.rules[0].host}')
-        sed "s|https://0.0.0.0:6443|https://${hostname}|g" "${kubeconfig}.tmp" > "$kubeconfig"
+        sed "s|https://[^:]*:6443|https://${hostname}|g" "${kubeconfig}.tmp" > "$kubeconfig"
     else
         cp "${kubeconfig}.tmp" "$kubeconfig"
     fi
