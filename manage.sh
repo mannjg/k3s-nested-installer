@@ -157,7 +157,13 @@ cmd_refresh_kubeconfig() {
     local kubeconfig="${KUBECONFIGS_DIR}/k3s-${instance_name}.yaml"
 
     # Extract kubeconfig
-    kubectl exec -n "$namespace" "$pod_name" -c k3d -- sh -c "cat /output/kubeconfig.yaml" > "${kubeconfig}.tmp" 2>&1
+    kubectl cp "$namespace/$pod_name:/output/kubeconfig.yaml" "${kubeconfig}.tmp" -c k3d
+
+    # Validate the file was extracted
+    if [[ ! -s "${kubeconfig}.tmp" ]]; then
+        error "Failed to extract kubeconfig from pod (file is empty or missing)"
+        return 1
+    fi
 
     # Determine access method and update server URL
     if kubectl get svc -n "$namespace" k3s-nodeport &>/dev/null; then

@@ -673,7 +673,13 @@ extract_kubeconfig() {
     fi
 
     # Extract kubeconfig from pod
-    kubectl exec -n "$NAMESPACE" "$pod_name" -c k3d -- sh -c "cat /output/kubeconfig.yaml" > "${kubeconfig_file}.tmp" 2>&1
+    kubectl cp "$NAMESPACE/$pod_name:/output/kubeconfig.yaml" "${kubeconfig_file}.tmp" -c k3d
+
+    # Validate the file was extracted
+    if [[ ! -s "${kubeconfig_file}.tmp" ]]; then
+        error "Failed to extract kubeconfig from pod (file is empty or missing)"
+        return 1
+    fi
 
     # Modify server URL based on access method
     case "$ACCESS_METHOD" in
