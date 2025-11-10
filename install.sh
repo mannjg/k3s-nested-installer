@@ -39,6 +39,12 @@ DRY_RUN=false
 VERBOSE=false
 WAIT_TIMEOUT=300
 
+# Custom image defaults
+DIND_IMAGE="docker:dind"
+K3D_IMAGE="ghcr.io/k3d-io/k3d:latest"
+K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
+K3D_TOOLS_IMAGE=""  # Empty means use k3d's default
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -168,6 +174,22 @@ parse_args() {
                 MEMORY_REQUEST="$2"
                 shift 2
                 ;;
+            --dind-image)
+                DIND_IMAGE="$2"
+                shift 2
+                ;;
+            --k3d-image)
+                K3D_IMAGE="$2"
+                shift 2
+                ;;
+            --k3s-image)
+                K3S_IMAGE="$2"
+                shift 2
+                ;;
+            --k3d-tools-image)
+                K3D_TOOLS_IMAGE="$2"
+                shift 2
+                ;;
             --config)
                 CONFIG_FILE="$2"
                 shift 2
@@ -224,6 +246,12 @@ Resources:
   --cpu-request CPU         CPU request (default: ${CPU_REQUEST})
   --memory-request MEM      Memory request (default: ${MEMORY_REQUEST})
 
+Custom Images:
+  --dind-image IMAGE        Docker-in-Docker image (default: ${DIND_IMAGE})
+  --k3d-image IMAGE         K3d CLI tool image (default: ${K3D_IMAGE})
+  --k3s-image IMAGE         K3s server image (default: rancher/k3s:VERSION)
+  --k3d-tools-image IMAGE   K3d tools/proxy image (default: k3d's default)
+
 Advanced:
   --config FILE             Load configuration from YAML file
   --batch FILE              Install multiple instances from file
@@ -245,6 +273,13 @@ Examples:
   # Using Ingress
   $0 --name dev --access-method ingress --ingress-hostname k3s-dev.example.com
 
+  # Custom images (e.g., from private registry)
+  $0 --name dev \\
+    --dind-image myregistry.com/docker:dind \\
+    --k3d-image myregistry.com/k3d:v5.7.4 \\
+    --k3s-image myregistry.com/k3s:v1.31.5-k3s1 \\
+    --k3d-tools-image myregistry.com/k3d-proxy:v5.7.4
+
   # From config file
   $0 --config examples/single-instance.yaml
 
@@ -262,6 +297,11 @@ validate_config() {
     # Set default namespace if not specified
     if [[ -z "$NAMESPACE" ]]; then
         NAMESPACE="k3s-${INSTANCE_NAME}"
+    fi
+
+    # Update K3S_IMAGE if only k3s-version was specified
+    if [[ "$K3S_IMAGE" == "rancher/k3s:"* ]] && [[ "$K3S_VERSION" != "v1.31.5-k3s1" ]]; then
+        K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
     fi
 
     # Validate access method
@@ -359,7 +399,7 @@ spec:
     spec:
       containers:
       - name: dind
-        image: docker:dind
+        image: ${DIND_IMAGE}
         command:
           - dockerd
           - --host=unix:///var/run/docker.sock
@@ -382,7 +422,7 @@ spec:
         - name: docker-sock
           mountPath: /var/run
       - name: k3d
-        image: ghcr.io/k3d-io/k3d:latest
+        image: ${K3D_IMAGE}
         command:
           - /bin/sh
           - -c
@@ -423,7 +463,7 @@ spec:
             K3D_ARGS="\$K3D_ARGS \\
               --k3s-arg '--disable=traefik@server:0' \\
               --k3s-arg '--disable=servicelb@server:0' \\
-              --image=rancher/k3s:${K3S_VERSION}"
+              --image=${K3S_IMAGE}"
 
             eval "k3d cluster create ${INSTANCE_NAME} \$K3D_ARGS"
             k3d kubeconfig get ${INSTANCE_NAME} > /output/kubeconfig.yaml
@@ -433,6 +473,17 @@ spec:
         env:
         - name: DOCKER_HOST
           value: tcp://localhost:2375
+EOF
+
+    # Add K3D_IMAGE_LOADBALANCER env var if custom tools image specified
+    if [[ -n "$K3D_TOOLS_IMAGE" ]]; then
+        cat <<EOF
+        - name: K3D_IMAGE_LOADBALANCER
+          value: ${K3D_TOOLS_IMAGE}
+EOF
+    fi
+
+    cat <<EOF
         ports:
         - containerPort: 6443
           name: api
