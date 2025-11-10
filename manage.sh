@@ -157,7 +157,7 @@ cmd_refresh_kubeconfig() {
     local kubeconfig="${KUBECONFIGS_DIR}/k3s-${instance_name}.yaml"
 
     # Extract kubeconfig
-    kubectl exec -n "$namespace" "$pod_name" -c k3d -- cat /output/kubeconfig.yaml > "${kubeconfig}.tmp"
+    kubectl exec -n "$namespace" "$pod_name" -c k3d -- sh -c "cat /output/kubeconfig.yaml" > "${kubeconfig}.tmp" 2>&1
 
     # Determine access method and update server URL
     if kubectl get svc -n "$namespace" k3s-nodeport &>/dev/null; then
@@ -173,7 +173,7 @@ cmd_refresh_kubeconfig() {
         fi
     elif kubectl get ingress -n "$namespace" k3s-ingress &>/dev/null; then
         local hostname=$(kubectl get ingress -n "$namespace" k3s-ingress -o jsonpath='{.spec.rules[0].host}')
-        sed "s|https://localhost:6443|https://${hostname}|g" "${kubeconfig}.tmp" > "$kubeconfig"
+        sed "s|https://0.0.0.0:6443|https://${hostname}|g" "${kubeconfig}.tmp" > "$kubeconfig"
     else
         cp "${kubeconfig}.tmp" "$kubeconfig"
     fi

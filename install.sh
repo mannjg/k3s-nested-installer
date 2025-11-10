@@ -673,7 +673,7 @@ extract_kubeconfig() {
     fi
 
     # Extract kubeconfig from pod
-    kubectl exec -n "$NAMESPACE" "$pod_name" -c k3d -- cat /output/kubeconfig.yaml > "${kubeconfig_file}.tmp"
+    kubectl exec -n "$NAMESPACE" "$pod_name" -c k3d -- sh -c "cat /output/kubeconfig.yaml" > "${kubeconfig_file}.tmp" 2>&1
 
     # Modify server URL based on access method
     case "$ACCESS_METHOD" in
@@ -701,7 +701,7 @@ extract_kubeconfig() {
             fi
             ;;
         ingress)
-            sed "s|https://localhost:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            sed "s|https://0.0.0.0:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
             ;;
     esac
 
