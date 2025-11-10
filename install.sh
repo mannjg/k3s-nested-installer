@@ -246,11 +246,13 @@ Resources:
   --cpu-request CPU         CPU request (default: ${CPU_REQUEST})
   --memory-request MEM      Memory request (default: ${MEMORY_REQUEST})
 
-Custom Images:
+Custom Images (for airgapped/private registry):
   --dind-image IMAGE        Docker-in-Docker image (default: ${DIND_IMAGE})
   --k3d-image IMAGE         K3d CLI tool image (default: ${K3D_IMAGE})
   --k3s-image IMAGE         K3s server image (default: rancher/k3s:VERSION)
-  --k3d-tools-image IMAGE   K3d tools/proxy image (default: k3d's default)
+  --k3d-tools-image IMAGE   K3d helper containers image (proxy, tools, registry)
+                            Sets K3D_IMAGE_LOADBALANCER, K3D_IMAGE_TOOLS, K3D_IMAGE_REGISTRY
+                            (default: k3d's default ghcr.io images)
 
 Advanced:
   --config FILE             Load configuration from YAML file
@@ -273,7 +275,12 @@ Examples:
   # Using Ingress
   $0 --name dev --access-method ingress --ingress-hostname k3s-dev.example.com
 
-  # Custom images (e.g., from private registry)
+  # Custom images for airgapped/private registry
+  # Required images to mirror:
+  #   docker:dind
+  #   ghcr.io/k3d-io/k3d:v5.x.x (CLI tool)
+  #   rancher/k3s:v1.x.x-k3s1 (k3s server)
+  #   ghcr.io/k3d-io/k3d-proxy:v5.x.x (helper containers)
   $0 --name dev \\
     --dind-image myregistry.com/docker:dind \\
     --k3d-image myregistry.com/k3d:v5.7.4 \\
@@ -475,10 +482,15 @@ spec:
           value: tcp://localhost:2375
 EOF
 
-    # Add K3D_IMAGE_LOADBALANCER env var if custom tools image specified
+    # Add k3d image override env vars if custom tools image specified
+    # These control all helper containers that k3d creates
     if [[ -n "$K3D_TOOLS_IMAGE" ]]; then
         cat <<EOF
         - name: K3D_IMAGE_LOADBALANCER
+          value: ${K3D_TOOLS_IMAGE}
+        - name: K3D_IMAGE_TOOLS
+          value: ${K3D_TOOLS_IMAGE}
+        - name: K3D_IMAGE_REGISTRY
           value: ${K3D_TOOLS_IMAGE}
 EOF
     fi
