@@ -384,21 +384,44 @@ spec:
           - -c
         args:
           - |
-            sleep 15
-            k3d cluster create ${INSTANCE_NAME} \\
-              --api-port 0.0.0.0:6443 \\
+            echo "Waiting for Docker to be ready..."
+            for i in \$(seq 1 60); do
+              if docker info >/dev/null 2>&1; then
+                echo "Docker is ready!"
+                break
+              fi
+              echo "Waiting for Docker... (\$i/60)"
+              sleep 2
+            done
+
+            if ! docker info >/dev/null 2>&1; then
+              echo "ERROR: Docker failed to start"
+              exit 1
+            fi
+
+            # Build k3d args
+            K3D_ARGS="--api-port 0.0.0.0:6443 \\
               --servers 1 \\
               --agents 0 \\
               --wait \\
               --timeout 5m \\
-              --k3s-arg "--tls-san=${INSTANCE_NAME}@server:0" \\
-              --k3s-arg "--tls-san=k3s-service@server:0" \\
-              --k3s-arg "--tls-san=k3s-service.${NAMESPACE}.svc.cluster.local@server:0" \\
-              --k3s-arg "--tls-san=127.0.0.1@server:0" \\
-              --k3s-arg "--tls-san=localhost@server:0" \\
-              --k3s-arg "--disable=traefik@server:0" \\
-              --k3s-arg "--disable=servicelb@server:0" \\
-              --k3s-image=rancher/k3s:${K3S_VERSION}
+              --k3s-arg '--tls-san=${INSTANCE_NAME}@server:0' \\
+              --k3s-arg '--tls-san=k3s-service@server:0' \\
+              --k3s-arg '--tls-san=k3s-service.${NAMESPACE}.svc.cluster.local@server:0' \\
+              --k3s-arg '--tls-san=127.0.0.1@server:0' \\
+              --k3s-arg '--tls-san=localhost@server:0'"
+
+            # Add ingress hostname TLS SAN if set
+            if [ -n "${INGRESS_HOSTNAME}" ]; then
+              K3D_ARGS="\$K3D_ARGS --k3s-arg '--tls-san=${INGRESS_HOSTNAME}@server:0'"
+            fi
+
+            K3D_ARGS="\$K3D_ARGS \\
+              --k3s-arg '--disable=traefik@server:0' \\
+              --k3s-arg '--disable=servicelb@server:0' \\
+              --image=rancher/k3s:${K3S_VERSION}"
+
+            eval "k3d cluster create ${INSTANCE_NAME} \$K3D_ARGS"
             k3d kubeconfig get ${INSTANCE_NAME} > /output/kubeconfig.yaml
             chmod 666 /output/kubeconfig.yaml
             echo "K3s cluster '${INSTANCE_NAME}' is ready!"
@@ -427,10 +450,11 @@ spec:
             command:
             - sh
             - -c
-            - test -f /output/kubeconfig.yaml
-          initialDelaySeconds: 60
+            - kubectl --kubeconfig=/output/kubeconfig.yaml get nodes 2>/dev/null | grep -q Ready
+          initialDelaySeconds: 90
           periodSeconds: 10
           timeoutSeconds: 5
+          failureThreshold: 3
       volumes:
       - name: docker-storage
         emptyDir: {}
@@ -673,11 +697,11 @@ extract_kubeconfig() {
                 warn "Could not get LoadBalancer IP. Please update kubeconfig manually."
                 cp "${kubeconfig_file}.tmp" "$kubeconfig_file"
             else
-                sed "s|https://0.0.0.0:6443|https://${external_ip}:6443|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+                sed "s|https://localhost:6443|https://${external_ip}:6443|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
             fi
             ;;
         ingress)
-            sed "s|https://0.0.0.0:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
+            sed "s|https://localhost:6443|https://${INGRESS_HOSTNAME}|g" "${kubeconfig_file}.tmp" > "$kubeconfig_file"
             ;;
     esac
 
