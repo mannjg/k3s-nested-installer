@@ -507,9 +507,6 @@ data:
       registry.k8s.io:
         endpoint:
           - "https://${PRIVATE_REGISTRY}"
-      rancher:
-        endpoint:
-          - "https://${PRIVATE_REGISTRY}"
     configs:
       "${PRIVATE_REGISTRY}":
 ${tls_config}

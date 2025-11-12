@@ -244,12 +244,28 @@ add_image() {
     debug "Adding image: $name ($source)"
 
     if [[ "$FORMAT" == "mapping" ]]; then
-        # Extract image name and tag from source
-        local image_name=$(echo "$source" | awk -F'/' '{print $NF}' | cut -d':' -f1)
-        local image_tag=$(echo "$source" | awk -F':' '{print $NF}')
+        # Parse source image to preserve path structure
+        local source_without_tag="${source%:*}"  # Remove tag
+        local tag="${source##*:}"                 # Extract tag
+        
+        # Determine if source has explicit registry domain
+        local path_component=""
+        if [[ "$source_without_tag" =~ ^([^/]+\.[^/]+)/(.+)$ ]]; then
+            # Has explicit registry domain (contains dot before first slash)
+            # e.g., "ghcr.io/k3d-io/k3d-tools" -> keep "k3d-io/k3d-tools"
+            path_component="${BASH_REMATCH[2]}"
+        elif [[ "$source_without_tag" =~ / ]]; then
+            # Has slash but no explicit registry (implicit docker.io)
+            # e.g., "rancher/k3s" -> keep "rancher/k3s"
+            path_component="$source_without_tag"
+        else
+            # Single component name (implicit docker.io/library)
+            # e.g., "docker" -> "library/docker"
+            path_component="library/$source_without_tag"
+        fi
 
-        # Generate target image path
-        local target="${TARGET_REGISTRY}/${image_name}:${image_tag}"
+        # Generate target image path preserving structure
+        local target="${TARGET_REGISTRY}/${path_component}:${tag}"
 
         echo "${source}=${target}" >> "$output"
     else

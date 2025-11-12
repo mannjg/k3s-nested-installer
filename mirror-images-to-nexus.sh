@@ -210,6 +210,14 @@ check_prerequisites() {
         fatal "Docker is not running. Please start Docker and try again."
     fi
 
+    # Check for Docker Buildx (needed for multi-arch support)
+    if ! docker buildx version &> /dev/null; then
+        warn "Docker buildx not available - multi-arch images will be converted to single-arch"
+        warn "To enable multi-arch support: docker buildx create --use"
+    else
+        debug "Docker buildx available for multi-arch image support"
+    fi
+
     # Check input file format
     if ! grep -q "=" "$INPUT_FILE"; then
         fatal "Input file format invalid. Expected format: SOURCE_IMAGE=TARGET_IMAGE"
@@ -317,25 +325,47 @@ mirror_single_image() {
 
     debug "Mirroring: $source -> $target"
 
-    # Step 1: Pull source image
-    log "  Pulling from public registry..."
-    if ! docker pull "$source" 2>&1 | grep -v "Pulling from" | grep -v "Digest:" | grep -v "Status:" || true; then
-        error "Failed to pull $source"
-        return 1
+    # Check if source image is multi-arch
+    local is_multiarch=false
+    if docker manifest inspect "$source" 2>/dev/null | grep -q "manifests"; then
+        local manifest_count=$(docker manifest inspect "$source" 2>/dev/null | grep -c '"platform":')
+        if [[ $manifest_count -gt 1 ]]; then
+            is_multiarch=true
+            log "  Detected multi-arch image with $manifest_count platforms"
+        fi
     fi
 
-    # Step 2: Tag for target registry
-    debug "Tagging image..."
-    if ! docker tag "$source" "$target" 2>&1; then
-        error "Failed to tag image"
-        return 1
-    fi
+    if [[ "$is_multiarch" == "true" ]]; then
+        # Use buildx imagetools for multi-arch images (preserves all platforms)
+        log "  Using buildx imagetools to preserve multi-arch manifest..."
+        if ! docker buildx imagetools create --tag "$target" "$source" 2>&1 | grep -v "^$" || true; then
+            error "Failed to mirror multi-arch image $source"
+            return 1
+        fi
+    else
+        # Use traditional pull/tag/push for single-arch images
+        log "  Single-arch image, using pull/tag/push..."
+        
+        # Step 1: Pull source image
+        log "    Pulling from public registry..."
+        if ! docker pull "$source" 2>&1 | grep -v "Pulling from" | grep -v "Digest:" | grep -v "Status:" || true; then
+            error "Failed to pull $source"
+            return 1
+        fi
 
-    # Step 3: Push to target registry
-    log "  Pushing to private registry..."
-    if ! docker push "$target" 2>&1 | grep -v "Pushing" | grep -v "Pushed" | grep -v "digest:" || true; then
-        error "Failed to push $target"
-        return 1
+        # Step 2: Tag for target registry
+        debug "  Tagging image..."
+        if ! docker tag "$source" "$target" 2>&1; then
+            error "Failed to tag image"
+            return 1
+        fi
+
+        # Step 3: Push to target registry
+        log "    Pushing to private registry..."
+        if ! docker push "$target" 2>&1 | grep -v "Pushing" | grep -v "Pushed" | grep -v "digest:" || true; then
+            error "Failed to push $target"
+            return 1
+        fi
     fi
 
     # Step 4: Verify (unless skipped)
