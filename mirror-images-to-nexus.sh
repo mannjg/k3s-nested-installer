@@ -265,24 +265,11 @@ check_prerequisites() {
         fatal "Docker is not running. Please start Docker and try again."
     fi
 
-    # Check for skopeo if insecure flag is used (better for self-signed certs)
+    # When using --insecure, just use simple docker pull/tag/push
+    # This matches manual workflow and respects daemon.json insecure-registries
     if [[ "$INSECURE" == "true" ]]; then
-        if command -v skopeo &> /dev/null; then
-            success "Using skopeo for multi-arch image mirroring (supports --dest-tls-verify=false)"
-            USE_SKOPEO=true
-        else
-            warn "Skopeo not found - will attempt buildx with insecure registry"
-            warn "For better self-signed cert support, install skopeo:"
-            warn "  RHEL/CentOS: sudo dnf install skopeo"
-            warn "  Ubuntu/Debian: sudo apt-get install skopeo"
-            USE_SKOPEO=false
-            
-            # Fall back to buildx
-            if ! docker buildx version &> /dev/null; then
-                fatal "Neither skopeo nor docker buildx available. Cannot proceed with --insecure."
-            fi
-            setup_insecure_buildx
-        fi
+        log "Using simple pull/tag/push mode (works with daemon.json insecure-registries)"
+        warn "Note: Multi-arch manifests will not be preserved (host architecture only)"
     else
         # Check for Docker Buildx (needed for multi-arch support)
         if ! docker buildx version &> /dev/null; then
@@ -291,7 +278,6 @@ check_prerequisites() {
         else
             debug "Docker buildx available for multi-arch image support"
         fi
-        USE_SKOPEO=false
     fi
 
     # Check input file format
@@ -407,30 +393,34 @@ mirror_single_image() {
 
     debug "Mirroring: $source -> $target"
 
-    # If skopeo is available and we're in insecure mode, use it for everything
-    if [[ "$USE_SKOPEO" == "true" ]]; then
-        log "  Using skopeo to preserve multi-arch manifest..."
+    # If using --insecure flag, use simple pull/tag/push for everything
+    # This matches what users do manually and works with daemon.json insecure-registries
+    if [[ "$INSECURE" == "true" ]]; then
+        log "  Using pull/tag/push (insecure mode)..."
         
-        local tls_verify_flag=""
-        if [[ "$INSECURE" == "true" ]]; then
-            tls_verify_flag="--dest-tls-verify=false"
+        # Step 1: Pull source image
+        if ! docker pull "$source" 2>&1 | grep -v "Pulling from" | grep -v "Digest:" | grep -v "Status:" || true; then
+            error "Failed to pull $source"
+            return 1
         fi
-        
-        if ! skopeo copy \
-            --src-tls-verify=true \
-            $tls_verify_flag \
-            --all \
-            "docker://$source" \
-            "docker://$target" 2>&1; then
-            error "Failed to mirror image with skopeo: $source"
+
+        # Step 2: Tag for target registry
+        if ! docker tag "$source" "$target" 2>&1; then
+            error "Failed to tag image"
+            return 1
+        fi
+
+        # Step 3: Push to target registry
+        if ! docker push "$target" 2>&1 | grep -v "Pushing" | grep -v "Pushed" | grep -v "digest:" || true; then
+            error "Failed to push $target"
             return 1
         fi
         
-        success "  ✓ Successfully mirrored with skopeo"
+        success "  ✓ Successfully mirrored"
         return 0
     fi
 
-    # Fall back to docker-based methods
+    # Normal mode: try to preserve multi-arch if possible
     # Check if source image is multi-arch
     local is_multiarch=false
     if docker manifest inspect "$source" 2>/dev/null | grep -q "manifests"; then
@@ -445,12 +435,6 @@ mirror_single_image() {
         # Use buildx imagetools for multi-arch images (preserves all platforms)
         log "  Using buildx imagetools to preserve multi-arch manifest..."
         
-        # Show current builder if verbose
-        if [[ "$VERBOSE" == "true" ]]; then
-            debug "Current builder: $(docker buildx inspect --bootstrap 2>&1 | grep Name | awk '{print $2}')"
-        fi
-        
-        # Run the imagetools command
         if ! docker buildx imagetools create --tag "$target" "$source" 2>&1; then
             error "Failed to mirror multi-arch image $source"
             return 1
@@ -460,28 +444,25 @@ mirror_single_image() {
         log "  Single-arch image, using pull/tag/push..."
         
         # Step 1: Pull source image
-        log "    Pulling from public registry..."
         if ! docker pull "$source" 2>&1 | grep -v "Pulling from" | grep -v "Digest:" | grep -v "Status:" || true; then
             error "Failed to pull $source"
             return 1
         fi
 
         # Step 2: Tag for target registry
-        debug "  Tagging image..."
         if ! docker tag "$source" "$target" 2>&1; then
             error "Failed to tag image"
             return 1
         fi
 
         # Step 3: Push to target registry
-        log "    Pushing to private registry..."
         if ! docker push "$target" 2>&1 | grep -v "Pushing" | grep -v "Pushed" | grep -v "digest:" || true; then
             error "Failed to push $target"
             return 1
         fi
     fi
 
-    # Step 4: Verify (unless skipped)
+    # Verify (unless skipped)
     if [[ "$SKIP_VERIFY" != "true" ]]; then
         debug "Verifying pushed image..."
         if ! verify_pushed_image "$target"; then
