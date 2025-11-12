@@ -214,16 +214,20 @@ setup_insecure_buildx() {
     cat > "$config_file" << EOF
 # BuildKit configuration for insecure registries
 [registry."${TARGET_REGISTRY}"]
-  http = true
+  http = false
   insecure = true
+  ca = []
 EOF
     
-    debug "Created buildkitd config at: $config_file"
+    log "Created buildkitd config at: $config_file"
+    if [[ "$VERBOSE" == "true" ]]; then
+        cat "$config_file" >&2
+    fi
     
     # Check if builder already exists
     if docker buildx inspect "$builder_name" &> /dev/null; then
-        debug "Builder '$builder_name' already exists, removing it..."
-        docker buildx rm "$builder_name" &> /dev/null || true
+        log "Builder '$builder_name' already exists, removing it..."
+        docker buildx rm "$builder_name" || true
     fi
     
     # Create new builder with insecure registry support
@@ -232,16 +236,19 @@ EOF
         --name "$builder_name" \
         --driver docker-container \
         --buildkitd-config "$config_file" \
-        --use &> /dev/null; then
+        --use; then
         success "Buildx builder configured for insecure registry: $TARGET_REGISTRY"
     else
-        warn "Failed to create buildx builder - will attempt without it"
-        warn "Multi-arch images may fail to mirror if registry uses self-signed certs"
+        fatal "Failed to create buildx builder. Cannot proceed with --insecure flag."
     fi
     
     # Bootstrap the builder
-    debug "Bootstrapping builder..."
-    docker buildx inspect --bootstrap &> /dev/null || true
+    log "Bootstrapping builder..."
+    if ! docker buildx inspect --bootstrap; then
+        fatal "Failed to bootstrap buildx builder"
+    fi
+    
+    success "Buildx builder is ready"
 }
 
 check_prerequisites() {
@@ -390,7 +397,14 @@ mirror_single_image() {
     if [[ "$is_multiarch" == "true" ]]; then
         # Use buildx imagetools for multi-arch images (preserves all platforms)
         log "  Using buildx imagetools to preserve multi-arch manifest..."
-        if ! docker buildx imagetools create --tag "$target" "$source" 2>&1 | grep -v "^$" || true; then
+        
+        # Show current builder if verbose
+        if [[ "$VERBOSE" == "true" ]]; then
+            debug "Current builder: $(docker buildx inspect --bootstrap 2>&1 | grep Name | awk '{print $2}')"
+        fi
+        
+        # Run the imagetools command
+        if ! docker buildx imagetools create --tag "$target" "$source" 2>&1; then
             error "Failed to mirror multi-arch image $source"
             return 1
         fi
