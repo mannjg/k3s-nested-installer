@@ -391,7 +391,8 @@ resolve_images() {
         # Legacy override takes precedence
         RESOLVED_DIND_IMAGE="$DIND_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
-        RESOLVED_DIND_IMAGE="${PRIVATE_REGISTRY}/docker:${DOCKER_VERSION}"
+        # docker:27-dind is shorthand for docker.io/library/docker:27-dind
+        RESOLVED_DIND_IMAGE="${PRIVATE_REGISTRY}/library/docker:${DOCKER_VERSION}"
     else
         RESOLVED_DIND_IMAGE="docker:${DOCKER_VERSION}"
     fi
@@ -400,7 +401,8 @@ resolve_images() {
     if [[ -n "$K3D_IMAGE" ]]; then
         RESOLVED_K3D_IMAGE="$K3D_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
-        RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d:${K3D_VERSION}"
+        # ghcr.io/k3d-io/k3d:v5.8.3 -> registry/k3d-io/k3d:v5.8.3
+        RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d:${K3D_VERSION}"
     else
         RESOLVED_K3D_IMAGE="ghcr.io/k3d-io/k3d:${K3D_VERSION}"
     fi
@@ -409,7 +411,8 @@ resolve_images() {
     if [[ -n "$K3S_IMAGE" ]]; then
         RESOLVED_K3S_IMAGE="$K3S_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
-        RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/k3s:${K3S_VERSION}"
+        # rancher/k3s:v1.31.5-k3s1 -> registry/rancher/k3s:v1.31.5-k3s1
+        RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/rancher/k3s:${K3S_VERSION}"
     else
         RESOLVED_K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
     fi
@@ -418,7 +421,8 @@ resolve_images() {
     if [[ -n "$K3D_TOOLS_IMAGE" ]]; then
         RESOLVED_K3D_TOOLS_IMAGE="$K3D_TOOLS_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
-        RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-tools:${K3D_TOOLS_VERSION}"
+        # ghcr.io/k3d-io/k3d-tools:5.8.3 -> registry/k3d-io/k3d-tools:5.8.3
+        RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
     else
         RESOLVED_K3D_TOOLS_IMAGE="ghcr.io/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
     fi
