@@ -399,19 +399,22 @@ mirror_single_image() {
         log "  Using pull/tag/push (insecure mode)..."
         
         # Step 1: Pull source image
-        if ! docker pull "$source" 2>&1 | grep -v "Pulling from" | grep -v "Digest:" | grep -v "Status:" || true; then
+        log "    Pulling from public registry..."
+        if ! docker pull "$source"; then
             error "Failed to pull $source"
             return 1
         fi
 
         # Step 2: Tag for target registry
-        if ! docker tag "$source" "$target" 2>&1; then
+        log "    Tagging image..."
+        if ! docker tag "$source" "$target"; then
             error "Failed to tag image"
             return 1
         fi
 
         # Step 3: Push to target registry
-        if ! docker push "$target" 2>&1 | grep -v "Pushing" | grep -v "Pushed" | grep -v "digest:" || true; then
+        log "    Pushing to private registry..."
+        if ! docker push "$target"; then
             error "Failed to push $target"
             return 1
         fi
@@ -444,19 +447,22 @@ mirror_single_image() {
         log "  Single-arch image, using pull/tag/push..."
         
         # Step 1: Pull source image
-        if ! docker pull "$source" 2>&1 | grep -v "Pulling from" | grep -v "Digest:" | grep -v "Status:" || true; then
+        log "    Pulling from public registry..."
+        if ! docker pull "$source"; then
             error "Failed to pull $source"
             return 1
         fi
 
         # Step 2: Tag for target registry
-        if ! docker tag "$source" "$target" 2>&1; then
+        log "    Tagging image..."
+        if ! docker tag "$source" "$target"; then
             error "Failed to tag image"
             return 1
         fi
 
         # Step 3: Push to target registry
-        if ! docker push "$target" 2>&1 | grep -v "Pushing" | grep -v "Pushed" | grep -v "digest:" || true; then
+        log "    Pushing to private registry..."
+        if ! docker push "$target"; then
             error "Failed to push $target"
             return 1
         fi
