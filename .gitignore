@@ -1,0 +1,7 @@
+# Runtime generated files
+kubeconfigs/
+reports/
+*.log
+
+# Serena AI assistant
+.serena/

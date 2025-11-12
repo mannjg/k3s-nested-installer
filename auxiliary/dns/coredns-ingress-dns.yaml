@@ -1,0 +1,66 @@
+# CoreDNS Configuration for Ingress DNS Resolution
+# This mimics production wildcard DNS by resolving *.local domains to the ingress controller
+#
+# IMPORTANT: Before applying, update the IP addresses in the hosts block below
+# with your actual ingress controller IP address.
+#
+# To find your ingress controller IP:
+#   kubectl get pod -n ingress -l name=nginx-ingress-microk8s -o wide
+#
+# Apply with:
+#   kubectl apply -f coredns-ingress-dns.yaml
+#
+# Rollback:
+#   kubectl apply -f backups/coredns-backup-YYYYMMDD-HHMMSS.yaml
+#
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    addonmanager.kubernetes.io/mode: EnsureExists
+    k8s-app: kube-dns
+  annotations:
+    description: "Custom CoreDNS config for resolving ingress domains"
+    configured-by: "k3s-nested-installer/auxiliary/dns/coredns-ingress-dns.yaml"
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+          lameduck 5s
+        }
+        ready
+        log . {
+          class error
+        }
+
+        # CUSTOM DNS FOR TEST ENVIRONMENT
+        # Resolves *.local domains to ingress controller
+        # This mimics production wildcard DNS (*.mydomain.com)
+        #
+        # ⚠️  UPDATE THE IP ADDRESS BELOW ⚠️
+        # Replace 10.1.153.25 with your ingress controller IP
+        # Find it with: kubectl get pod -n ingress -o wide
+        hosts {
+            10.1.153.25 docker.local
+            10.1.153.25 gitlab.local
+            10.1.153.25 nexus.local
+            10.1.153.25 jenkins.local
+            10.1.153.25 argocd.local
+            fallthrough
+        }
+
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+          pods insecure
+          fallthrough in-addr.arpa ip6.arpa
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf
+        cache 30
+        loop
+        reload
+        loadbalance
+    }

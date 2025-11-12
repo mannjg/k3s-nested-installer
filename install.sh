@@ -39,11 +39,21 @@ DRY_RUN=false
 VERBOSE=false
 WAIT_TIMEOUT=300
 
-# Custom image defaults
-DIND_IMAGE="docker:dind"
-K3D_IMAGE="ghcr.io/k3d-io/k3d:latest"
-K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
-K3D_TOOLS_IMAGE=""  # Empty means use k3d's default
+# Private Registry Configuration
+PRIVATE_REGISTRY=""           # Private registry URL (e.g., docker.local)
+REGISTRY_SECRET=""             # K8s secret name for registry auth
+REGISTRY_INSECURE=false        # Allow insecure (HTTP) registry
+
+# Image versions (used with or without private registry)
+DOCKER_VERSION="27-dind"
+K3D_VERSION="latest"
+K3D_TOOLS_VERSION="latest"
+
+# Legacy image override support (deprecated - use private registry instead)
+DIND_IMAGE=""
+K3D_IMAGE=""
+K3S_IMAGE=""
+K3D_TOOLS_IMAGE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -190,6 +200,18 @@ parse_args() {
                 K3D_TOOLS_IMAGE="$2"
                 shift 2
                 ;;
+            --private-registry)
+                PRIVATE_REGISTRY="$2"
+                shift 2
+                ;;
+            --registry-secret)
+                REGISTRY_SECRET="$2"
+                shift 2
+                ;;
+            --registry-insecure)
+                REGISTRY_INSECURE=true
+                shift
+                ;;
             --config)
                 CONFIG_FILE="$2"
                 shift 2
@@ -246,13 +268,17 @@ Resources:
   --cpu-request CPU         CPU request (default: ${CPU_REQUEST})
   --memory-request MEM      Memory request (default: ${MEMORY_REQUEST})
 
-Custom Images (for airgapped/private registry):
-  --dind-image IMAGE        Docker-in-Docker image (default: ${DIND_IMAGE})
-  --k3d-image IMAGE         K3d CLI tool image (default: ${K3D_IMAGE})
-  --k3s-image IMAGE         K3s server image (default: rancher/k3s:VERSION)
-  --k3d-tools-image IMAGE   K3d helper containers image (proxy, tools, registry)
-                            Sets K3D_IMAGE_LOADBALANCER, K3D_IMAGE_TOOLS, K3D_IMAGE_REGISTRY
-                            (default: k3d's default ghcr.io images)
+Private Registry (for airgapped environments):
+  --private-registry URL    Private registry URL (e.g., docker.local, myregistry.com:5000)
+  --registry-secret NAME    K8s secret name for registry authentication
+                            Create with: kubectl create secret docker-registry <name> ...
+  --registry-insecure       Allow insecure (HTTP) registry connections
+
+Custom Images (legacy - prefer --private-registry):
+  --dind-image IMAGE        Docker-in-Docker image override
+  --k3d-image IMAGE         K3d CLI tool image override
+  --k3s-image IMAGE         K3s server image override
+  --k3d-tools-image IMAGE   K3d helper containers image override
 
 Advanced:
   --config FILE             Load configuration from YAML file
@@ -331,10 +357,77 @@ validate_config() {
             ;;
     esac
 
+    # Validate private registry configuration
+    if [[ -n "$REGISTRY_SECRET" && -z "$PRIVATE_REGISTRY" ]]; then
+        fatal "Registry secret specified but no private registry URL provided. Use --private-registry <url>"
+    fi
+
+    if [[ "$REGISTRY_INSECURE" == "true" && -z "$PRIVATE_REGISTRY" ]]; then
+        fatal "Registry insecure flag set but no private registry URL provided. Use --private-registry <url>"
+    fi
+
+    if [[ -n "$PRIVATE_REGISTRY" ]]; then
+        log "Private registry configuration detected"
+        log "  Registry: $PRIVATE_REGISTRY"
+        log "  Secret: ${REGISTRY_SECRET:-<none - will use public images>}"
+        log "  Insecure: $REGISTRY_INSECURE"
+
+        if [[ -z "$REGISTRY_SECRET" ]]; then
+            warn "No registry secret specified. Images must be publicly accessible or authentication must be pre-configured."
+        fi
+    fi
+
     debug "Configuration validated:"
     debug "  Instance: $INSTANCE_NAME"
     debug "  Namespace: $NAMESPACE"
     debug "  Access Method: $ACCESS_METHOD"
+}
+
+resolve_images() {
+    # Resolve final image references based on private registry or legacy overrides
+
+    # Docker-in-Docker image
+    if [[ -n "$DIND_IMAGE" ]]; then
+        # Legacy override takes precedence
+        RESOLVED_DIND_IMAGE="$DIND_IMAGE"
+    elif [[ -n "$PRIVATE_REGISTRY" ]]; then
+        RESOLVED_DIND_IMAGE="${PRIVATE_REGISTRY}/docker:${DOCKER_VERSION}"
+    else
+        RESOLVED_DIND_IMAGE="docker:${DOCKER_VERSION}"
+    fi
+
+    # K3d CLI tool image
+    if [[ -n "$K3D_IMAGE" ]]; then
+        RESOLVED_K3D_IMAGE="$K3D_IMAGE"
+    elif [[ -n "$PRIVATE_REGISTRY" ]]; then
+        RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d:${K3D_VERSION}"
+    else
+        RESOLVED_K3D_IMAGE="ghcr.io/k3d-io/k3d:${K3D_VERSION}"
+    fi
+
+    # K3s server image
+    if [[ -n "$K3S_IMAGE" ]]; then
+        RESOLVED_K3S_IMAGE="$K3S_IMAGE"
+    elif [[ -n "$PRIVATE_REGISTRY" ]]; then
+        RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/k3s:${K3S_VERSION}"
+    else
+        RESOLVED_K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
+    fi
+
+    # K3d tools/helper image
+    if [[ -n "$K3D_TOOLS_IMAGE" ]]; then
+        RESOLVED_K3D_TOOLS_IMAGE="$K3D_TOOLS_IMAGE"
+    elif [[ -n "$PRIVATE_REGISTRY" ]]; then
+        RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-tools:${K3D_TOOLS_VERSION}"
+    else
+        RESOLVED_K3D_TOOLS_IMAGE="ghcr.io/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+    fi
+
+    debug "Resolved images:"
+    debug "  DIND: $RESOLVED_DIND_IMAGE"
+    debug "  K3D: $RESOLVED_K3D_IMAGE"
+    debug "  K3S: $RESOLVED_K3S_IMAGE"
+    debug "  K3D_TOOLS: $RESOLVED_K3D_TOOLS_IMAGE"
 }
 
 #############################################################################
@@ -382,6 +475,47 @@ ${storage_class_line}
 EOF
 }
 
+generate_registries_configmap() {
+    if [[ -z "$PRIVATE_REGISTRY" ]]; then
+        return 0
+    fi
+
+    local tls_config=""
+    if [[ "$REGISTRY_INSECURE" == "true" ]]; then
+        tls_config="      tls:
+        insecure_skip_verify: true"
+    fi
+
+    cat <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k3s-registries
+  namespace: ${NAMESPACE}
+  labels:
+    app: k3s
+    instance: ${INSTANCE_NAME}
+data:
+  registries.yaml: |
+    mirrors:
+      docker.io:
+        endpoint:
+          - "https://${PRIVATE_REGISTRY}"
+      ghcr.io:
+        endpoint:
+          - "https://${PRIVATE_REGISTRY}"
+      registry.k8s.io:
+        endpoint:
+          - "https://${PRIVATE_REGISTRY}"
+      rancher:
+        endpoint:
+          - "https://${PRIVATE_REGISTRY}"
+    configs:
+      "${PRIVATE_REGISTRY}":
+${tls_config}
+EOF
+}
+
 generate_deployment() {
     cat <<EOF
 apiVersion: apps/v1
@@ -393,6 +527,8 @@ metadata:
     app: k3s
     instance: ${INSTANCE_NAME}
 spec:
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
@@ -404,13 +540,73 @@ spec:
         app: k3s
         instance: ${INSTANCE_NAME}
     spec:
+EOF
+
+    # Add imagePullSecrets if using private registry with secret
+    if [[ -n "$PRIVATE_REGISTRY" && -n "$REGISTRY_SECRET" ]]; then
+        cat <<EOF
+      imagePullSecrets:
+      - name: ${REGISTRY_SECRET}
+EOF
+    fi
+
+    cat <<EOF
       containers:
       - name: dind
-        image: ${DIND_IMAGE}
+        image: ${RESOLVED_DIND_IMAGE}
         command:
-          - dockerd
-          - --host=unix:///var/run/docker.sock
-          - --host=tcp://0.0.0.0:2375
+          - /bin/sh
+          - -c
+        args:
+          - |
+            # Start dockerd in background
+            dockerd \\
+              --host=unix:///var/run/docker.sock \\
+              --host=tcp://0.0.0.0:2375 \\
+EOF
+
+    # Add insecure-registry flag if configured
+    if [[ "$REGISTRY_INSECURE" == "true" && -n "$PRIVATE_REGISTRY" ]]; then
+        cat <<EOF
+              --insecure-registry=${PRIVATE_REGISTRY} \\
+EOF
+    fi
+
+    cat <<EOF
+              &
+
+            # Wait for Docker to be ready
+            echo "Waiting for Docker daemon to be ready..."
+            for i in \$(seq 1 30); do
+              if docker info >/dev/null 2>&1; then
+                echo "Docker daemon is ready"
+                break
+              fi
+              sleep 1
+            done
+EOF
+
+    # Add docker config setup if registry secret is configured
+    if [[ -n "$PRIVATE_REGISTRY" && -n "$REGISTRY_SECRET" ]]; then
+        cat <<EOF
+
+            # Setup Docker registry credentials
+            echo "Setting up Docker registry credentials..."
+            if [ -f /tmp/docker-secret/config.json ]; then
+              mkdir -p /root/.docker
+              cp /tmp/docker-secret/config.json /root/.docker/config.json
+              chmod 600 /root/.docker/config.json
+              echo "Docker credentials configured for ${PRIVATE_REGISTRY}"
+            else
+              echo "WARNING: Registry secret not found at /tmp/docker-secret/config.json"
+            fi
+EOF
+    fi
+
+    cat <<EOF
+
+            # Keep container running
+            wait
         env:
         - name: DOCKER_TLS_CERTDIR
           value: ""
@@ -428,8 +624,20 @@ spec:
           mountPath: /var/lib/docker
         - name: docker-sock
           mountPath: /var/run
+EOF
+
+    # Add registry secret mount to dind if configured
+    if [[ -n "$PRIVATE_REGISTRY" && -n "$REGISTRY_SECRET" ]]; then
+        cat <<EOF
+        - name: registry-secret
+          mountPath: /tmp/docker-secret
+          readOnly: true
+EOF
+    fi
+
+    cat <<EOF
       - name: k3d
-        image: ${K3D_IMAGE}
+        image: ${RESOLVED_K3D_IMAGE}
         command:
           - /bin/sh
           - -c
@@ -449,11 +657,54 @@ spec:
               echo "ERROR: Docker failed to start"
               exit 1
             fi
+EOF
+
+    # Add docker credentials setup if private registry is configured with secret
+    if [[ -n "$PRIVATE_REGISTRY" && -n "$REGISTRY_SECRET" ]]; then
+        cat <<EOF
+
+            # Setup Docker registry credentials for k3d
+            echo "Setting up Docker registry credentials for k3d..."
+            if [ -f /tmp/docker-secret/config.json ]; then
+              mkdir -p /root/.docker
+              cp /tmp/docker-secret/config.json /root/.docker/config.json
+              chmod 600 /root/.docker/config.json
+              echo "Docker credentials configured for k3d"
+
+              # Pre-pull all required images to verify credentials
+              echo "Pre-pulling required images from private registry..."
+
+              echo "Pulling k3s image..."
+              if ! docker pull ${RESOLVED_K3S_IMAGE}; then
+                echo "ERROR: Failed to pull k3s image"
+                exit 1
+              fi
+
+              echo "Pulling k3d tools image..."
+              if ! docker pull ${RESOLVED_K3D_TOOLS_IMAGE}; then
+                echo "ERROR: Failed to pull k3d tools image"
+                exit 1
+              fi
+
+              echo "All images pre-pulled successfully"
+
+              # Copy registries.yaml to writable location for k3d volume mount
+              echo "Copying registries.yaml to /tmp for k3d..."
+              cp /etc/rancher/k3s/registries.yaml /tmp/registries.yaml
+              chmod 644 /tmp/registries.yaml
+            else
+              echo "WARNING: Registry secret not found at /tmp/docker-secret/config.json"
+            fi
+EOF
+    fi
+
+    cat <<EOF
 
             # Build k3d args
             K3D_ARGS="--api-port 0.0.0.0:6443 \\
               --servers 1 \\
               --agents 0 \\
+              --no-lb \\
               --wait \\
               --timeout 5m \\
               --k3s-arg '--tls-san=${INSTANCE_NAME}@server:0' \\
@@ -466,11 +717,23 @@ spec:
             if [ -n "${INGRESS_HOSTNAME}" ]; then
               K3D_ARGS="\$K3D_ARGS --k3s-arg '--tls-san=${INGRESS_HOSTNAME}@server:0'"
             fi
+EOF
+
+    # Add registries.yaml configuration if private registry is configured
+    if [[ -n "$PRIVATE_REGISTRY" ]]; then
+        cat <<EOF
+
+            # Add private registry configuration using k3d's native flag
+            K3D_ARGS="\$K3D_ARGS --registry-config /tmp/registries.yaml"
+EOF
+    fi
+
+    cat <<EOF
 
             K3D_ARGS="\$K3D_ARGS \\
               --k3s-arg '--disable=traefik@server:0' \\
               --k3s-arg '--disable=servicelb@server:0' \\
-              --image=${K3S_IMAGE}"
+              --image=${RESOLVED_K3S_IMAGE}"
 
             eval "k3d cluster create ${INSTANCE_NAME} \$K3D_ARGS"
             k3d kubeconfig get ${INSTANCE_NAME} > /output/kubeconfig.yaml
@@ -482,16 +745,16 @@ spec:
           value: tcp://localhost:2375
 EOF
 
-    # Add k3d image override env vars if custom tools image specified
-    # These control all helper containers that k3d creates
-    if [[ -n "$K3D_TOOLS_IMAGE" ]]; then
+    # Add k3d image override env vars if using private registry or custom tools image
+    # These control all helper containers that k3d creates (proxy, tools, registry)
+    if [[ -n "$RESOLVED_K3D_TOOLS_IMAGE" ]]; then
         cat <<EOF
         - name: K3D_IMAGE_LOADBALANCER
-          value: ${K3D_TOOLS_IMAGE}
+          value: ${RESOLVED_K3D_TOOLS_IMAGE}
         - name: K3D_IMAGE_TOOLS
-          value: ${K3D_TOOLS_IMAGE}
+          value: ${RESOLVED_K3D_TOOLS_IMAGE}
         - name: K3D_IMAGE_REGISTRY
-          value: ${K3D_TOOLS_IMAGE}
+          value: ${RESOLVED_K3D_TOOLS_IMAGE}
 EOF
     fi
 
@@ -512,6 +775,27 @@ EOF
           mountPath: /var/run
         - name: k3s-config
           mountPath: /output
+EOF
+
+    # Add registries config mount to k3d if configured
+    if [[ -n "$PRIVATE_REGISTRY" ]]; then
+        cat <<EOF
+        - name: registries-config
+          mountPath: /etc/rancher/k3s/registries.yaml
+          subPath: registries.yaml
+          readOnly: true
+EOF
+        # Also mount registry secret if configured
+        if [[ -n "$REGISTRY_SECRET" ]]; then
+            cat <<EOF
+        - name: registry-secret
+          mountPath: /tmp/docker-secret
+          readOnly: true
+EOF
+        fi
+    fi
+
+    cat <<EOF
         readinessProbe:
           exec:
             command:
@@ -530,6 +814,25 @@ EOF
       - name: k3s-config
         emptyDir: {}
 EOF
+
+    # Add private registry volumes if configured
+    if [[ -n "$PRIVATE_REGISTRY" ]]; then
+        cat <<EOF
+      - name: registries-config
+        configMap:
+          name: k3s-registries
+EOF
+        if [[ -n "$REGISTRY_SECRET" ]]; then
+            cat <<EOF
+      - name: registry-secret
+        secret:
+          secretName: ${REGISTRY_SECRET}
+          items:
+          - key: .dockerconfigjson
+            path: config.json
+EOF
+        fi
+    fi
 }
 
 generate_service_nodeport() {
@@ -638,6 +941,9 @@ EOF
 deploy_instance() {
     log "Deploying k3s instance '${INSTANCE_NAME}' in namespace '${NAMESPACE}'..."
 
+    # Resolve final image references
+    resolve_images
+
     # Create temporary manifest file
     local manifest_file=$(mktemp)
 
@@ -647,6 +953,13 @@ deploy_instance() {
         echo "---"
         generate_pvc
         echo "---"
+
+        # Generate registries ConfigMap if using private registry
+        if [[ -n "$PRIVATE_REGISTRY" ]]; then
+            generate_registries_configmap
+            echo "---"
+        fi
+
         generate_deployment
         echo "---"
         generate_service_clusterip
