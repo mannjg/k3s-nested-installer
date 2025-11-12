@@ -2,6 +2,7 @@
 kubeconfigs/
 reports/
 *.log
+buildkitd.toml
 
 # Serena AI assistant
 .serena/

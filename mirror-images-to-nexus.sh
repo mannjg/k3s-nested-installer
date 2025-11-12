@@ -24,6 +24,7 @@ DRY_RUN=false
 VERBOSE=false
 SKIP_VERIFY=false
 FORCE=false
+INSECURE=false
 OUTPUT_REPORT=""
 
 # Statistics
@@ -111,6 +112,10 @@ parse_args() {
                 SKIP_VERIFY=true
                 shift
                 ;;
+            --insecure)
+                INSECURE=true
+                shift
+                ;;
             --force)
                 FORCE=true
                 shift
@@ -147,6 +152,7 @@ Optional:
   --output FILE           Output report file (default: mirrored-images-TIMESTAMP.txt)
   --dry-run               Show what would be done without actually mirroring
   --skip-verify           Skip verification of pushed images
+  --insecure              Allow insecure HTTPS connections \(for self-signed certs\)
   --force                 Force push even if image already exists
   --verbose               Show detailed output
   -h, --help              Show this help message
@@ -190,12 +196,53 @@ validate_config() {
     debug "  Input File: $INPUT_FILE"
     debug "  Dry Run: $DRY_RUN"
     debug "  Skip Verify: $SKIP_VERIFY"
+    debug "  Insecure: $INSECURE"
     debug "  Force: $FORCE"
 }
 
 #############################################################################
 # Docker Prerequisites
 #############################################################################
+
+setup_insecure_buildx() {
+    log "Configuring buildx for insecure registry..."
+    
+    local builder_name="insecure-builder"
+    local config_file="/tmp/buildkitd-${TARGET_REGISTRY//[:\/.]/-}.toml"
+    
+    # Create buildkitd.toml configuration for insecure registry
+    cat > "$config_file" << EOF
+# BuildKit configuration for insecure registries
+[registry."${TARGET_REGISTRY}"]
+  http = true
+  insecure = true
+EOF
+    
+    debug "Created buildkitd config at: $config_file"
+    
+    # Check if builder already exists
+    if docker buildx inspect "$builder_name" &> /dev/null; then
+        debug "Builder '$builder_name' already exists, removing it..."
+        docker buildx rm "$builder_name" &> /dev/null || true
+    fi
+    
+    # Create new builder with insecure registry support
+    log "Creating buildx builder with insecure registry support..."
+    if docker buildx create \
+        --name "$builder_name" \
+        --driver docker-container \
+        --config "$config_file" \
+        --use &> /dev/null; then
+        success "Buildx builder configured for insecure registry: $TARGET_REGISTRY"
+    else
+        warn "Failed to create buildx builder - will attempt without it"
+        warn "Multi-arch images may fail to mirror if registry uses self-signed certs"
+    fi
+    
+    # Bootstrap the builder
+    debug "Bootstrapping builder..."
+    docker buildx inspect --bootstrap &> /dev/null || true
+}
 
 check_prerequisites() {
     log "Checking prerequisites..."
@@ -216,6 +263,11 @@ check_prerequisites() {
         warn "To enable multi-arch support: docker buildx create --use"
     else
         debug "Docker buildx available for multi-arch image support"
+        
+        # Configure buildx for insecure registry if requested
+        if [[ "$INSECURE" == "true" ]]; then
+            setup_insecure_buildx
+        fi
     fi
 
     # Check input file format
