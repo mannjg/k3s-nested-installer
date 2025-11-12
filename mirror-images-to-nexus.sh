@@ -25,6 +25,7 @@ VERBOSE=false
 SKIP_VERIFY=false
 FORCE=false
 INSECURE=false
+USE_SKOPEO=false
 OUTPUT_REPORT=""
 
 # Statistics
@@ -264,17 +265,33 @@ check_prerequisites() {
         fatal "Docker is not running. Please start Docker and try again."
     fi
 
-    # Check for Docker Buildx (needed for multi-arch support)
-    if ! docker buildx version &> /dev/null; then
-        warn "Docker buildx not available - multi-arch images will be converted to single-arch"
-        warn "To enable multi-arch support: docker buildx create --use"
-    else
-        debug "Docker buildx available for multi-arch image support"
-        
-        # Configure buildx for insecure registry if requested
-        if [[ "$INSECURE" == "true" ]]; then
+    # Check for skopeo if insecure flag is used (better for self-signed certs)
+    if [[ "$INSECURE" == "true" ]]; then
+        if command -v skopeo &> /dev/null; then
+            success "Using skopeo for multi-arch image mirroring (supports --dest-tls-verify=false)"
+            USE_SKOPEO=true
+        else
+            warn "Skopeo not found - will attempt buildx with insecure registry"
+            warn "For better self-signed cert support, install skopeo:"
+            warn "  RHEL/CentOS: sudo dnf install skopeo"
+            warn "  Ubuntu/Debian: sudo apt-get install skopeo"
+            USE_SKOPEO=false
+            
+            # Fall back to buildx
+            if ! docker buildx version &> /dev/null; then
+                fatal "Neither skopeo nor docker buildx available. Cannot proceed with --insecure."
+            fi
             setup_insecure_buildx
         fi
+    else
+        # Check for Docker Buildx (needed for multi-arch support)
+        if ! docker buildx version &> /dev/null; then
+            warn "Docker buildx not available - multi-arch images will be converted to single-arch"
+            warn "To enable multi-arch support: docker buildx create --use"
+        else
+            debug "Docker buildx available for multi-arch image support"
+        fi
+        USE_SKOPEO=false
     fi
 
     # Check input file format
@@ -313,9 +330,15 @@ authenticate_registry() {
         echo "" >&2
     fi
 
-    # Perform docker login
+    # Perform docker login (skopeo can use docker credentials)
     if echo "$PASSWORD" | docker login "$TARGET_REGISTRY" --username "$USERNAME" --password-stdin &> /dev/null; then
         success "Successfully authenticated to $TARGET_REGISTRY"
+        
+        # If using skopeo, also login with skopeo for redundancy
+        if [[ "$USE_SKOPEO" == "true" ]]; then
+            debug "Also authenticating with skopeo..."
+            echo "$PASSWORD" | skopeo login "$TARGET_REGISTRY" --username "$USERNAME" --password-stdin &> /dev/null || true
+        fi
     else
         fatal "Authentication failed. Please check your credentials."
     fi
@@ -384,6 +407,30 @@ mirror_single_image() {
 
     debug "Mirroring: $source -> $target"
 
+    # If skopeo is available and we're in insecure mode, use it for everything
+    if [[ "$USE_SKOPEO" == "true" ]]; then
+        log "  Using skopeo to preserve multi-arch manifest..."
+        
+        local tls_verify_flag=""
+        if [[ "$INSECURE" == "true" ]]; then
+            tls_verify_flag="--dest-tls-verify=false"
+        fi
+        
+        if ! skopeo copy \
+            --src-tls-verify=true \
+            $tls_verify_flag \
+            --all \
+            "docker://$source" \
+            "docker://$target" 2>&1; then
+            error "Failed to mirror image with skopeo: $source"
+            return 1
+        fi
+        
+        success "  ✓ Successfully mirrored with skopeo"
+        return 0
+    fi
+
+    # Fall back to docker-based methods
     # Check if source image is multi-arch
     local is_multiarch=false
     if docker manifest inspect "$source" 2>/dev/null | grep -q "manifests"; then
