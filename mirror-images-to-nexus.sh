@@ -231,7 +231,7 @@ EOF
     if docker buildx create \
         --name "$builder_name" \
         --driver docker-container \
-        --config "$config_file" \
+        --buildkitd-config "$config_file" \
         --use &> /dev/null; then
         success "Buildx builder configured for insecure registry: $TARGET_REGISTRY"
     else
