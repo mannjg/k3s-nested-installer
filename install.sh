@@ -46,8 +46,8 @@ REGISTRY_INSECURE=false        # Allow insecure (HTTP) registry
 
 # Image versions (used with or without private registry)
 DOCKER_VERSION="27-dind"
-K3D_VERSION="latest"
-K3D_TOOLS_VERSION="latest"
+K3D_VERSION="v5.8.3"
+K3D_TOOLS_VERSION="v5.8.3"
 
 # Legacy image override support (deprecated - use private registry instead)
 DIND_IMAGE=""
