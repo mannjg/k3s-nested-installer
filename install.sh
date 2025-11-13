@@ -41,6 +41,7 @@ WAIT_TIMEOUT=300
 
 # Private Registry Configuration
 PRIVATE_REGISTRY=""           # Private registry URL (e.g., docker.local)
+REGISTRY_PATH=""              # Optional path prefix (e.g., "docker-sandbox/jmann")
 REGISTRY_SECRET=""             # K8s secret name for registry auth
 REGISTRY_INSECURE=false        # Allow insecure (HTTP) registry
 
@@ -204,6 +205,10 @@ parse_args() {
                 PRIVATE_REGISTRY="$2"
                 shift 2
                 ;;
+            --registry-path)
+                REGISTRY_PATH="$2"
+                shift 2
+                ;;
             --registry-secret)
                 REGISTRY_SECRET="$2"
                 shift 2
@@ -270,6 +275,8 @@ Resources:
 
 Private Registry (for airgapped environments):
   --private-registry URL    Private registry URL (e.g., docker.local, myregistry.com:5000)
+  --registry-path PATH      Path prefix within registry (e.g., "docker-sandbox/jmann")
+                            Results in: registry/path/image-name:tag
   --registry-secret NAME    K8s secret name for registry authentication
                             Create with: kubectl create secret docker-registry <name> ...
   --registry-insecure       Allow insecure (HTTP) registry connections
@@ -301,17 +308,21 @@ Examples:
   # Using Ingress
   $0 --name dev --access-method ingress --ingress-hostname k3s-dev.example.com
 
-  # Custom images for airgapped/private registry
-  # Required images to mirror:
-  #   docker:dind
-  #   ghcr.io/k3d-io/k3d:v5.x.x (CLI tool)
-  #   rancher/k3s:v1.x.x-k3s1 (k3s server)
-  #   ghcr.io/k3d-io/k3d-proxy:v5.x.x (helper containers)
+  # Private registry with all images
+  # First, mirror images using list-required-images.sh and mirror-images-to-nexus.sh
+  $0 --name dev --private-registry artifactory.company.com
+
+  # Private registry with custom path (Artifactory/Nexus subdirectories)
+  $0 --name dev \\
+    --private-registry artifactory.company.com \\
+    --registry-path docker-sandbox/jmann
+
+  # Custom images (legacy - prefer --private-registry)
   $0 --name dev \\
     --dind-image myregistry.com/docker:dind \\
-    --k3d-image myregistry.com/k3d:v5.7.4 \\
+    --k3d-image myregistry.com/k3d:v5.8.3 \\
     --k3s-image myregistry.com/k3s:v1.31.5-k3s1 \\
-    --k3d-tools-image myregistry.com/k3d-proxy:v5.7.4
+    --k3d-tools-image myregistry.com/k3d-tools:v5.8.3
 
   # From config file
   $0 --config examples/single-instance.yaml
@@ -392,7 +403,11 @@ resolve_images() {
         RESOLVED_DIND_IMAGE="$DIND_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
         # docker:27-dind is shorthand for docker.io/library/docker:27-dind
-        RESOLVED_DIND_IMAGE="${PRIVATE_REGISTRY}/library/docker:${DOCKER_VERSION}"
+        if [[ -n "$REGISTRY_PATH" ]]; then
+            RESOLVED_DIND_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/library/docker:${DOCKER_VERSION}"
+        else
+            RESOLVED_DIND_IMAGE="${PRIVATE_REGISTRY}/library/docker:${DOCKER_VERSION}"
+        fi
     else
         RESOLVED_DIND_IMAGE="docker:${DOCKER_VERSION}"
     fi
@@ -402,7 +417,11 @@ resolve_images() {
         RESOLVED_K3D_IMAGE="$K3D_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
         # ghcr.io/k3d-io/k3d:v5.8.3 -> registry/k3d-io/k3d:v5.8.3
-        RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d:${K3D_VERSION}"
+        if [[ -n "$REGISTRY_PATH" ]]; then
+            RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/k3d-io/k3d:${K3D_VERSION}"
+        else
+            RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d:${K3D_VERSION}"
+        fi
     else
         RESOLVED_K3D_IMAGE="ghcr.io/k3d-io/k3d:${K3D_VERSION}"
     fi
@@ -412,7 +431,11 @@ resolve_images() {
         RESOLVED_K3S_IMAGE="$K3S_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
         # rancher/k3s:v1.31.5-k3s1 -> registry/rancher/k3s:v1.31.5-k3s1
-        RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/rancher/k3s:${K3S_VERSION}"
+        if [[ -n "$REGISTRY_PATH" ]]; then
+            RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/rancher/k3s:${K3S_VERSION}"
+        else
+            RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/rancher/k3s:${K3S_VERSION}"
+        fi
     else
         RESOLVED_K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
     fi
@@ -422,7 +445,11 @@ resolve_images() {
         RESOLVED_K3D_TOOLS_IMAGE="$K3D_TOOLS_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
         # ghcr.io/k3d-io/k3d-tools:5.8.3 -> registry/k3d-io/k3d-tools:5.8.3
-        RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+        if [[ -n "$REGISTRY_PATH" ]]; then
+            RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+        else
+            RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+        fi
     else
         RESOLVED_K3D_TOOLS_IMAGE="ghcr.io/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
     fi
@@ -490,6 +517,13 @@ generate_registries_configmap() {
         insecure_skip_verify: true"
     fi
 
+    # If REGISTRY_PATH is set, we need to use rewrite rules to prepend the path
+    local rewrite_rules=""
+    if [[ -n "$REGISTRY_PATH" ]]; then
+        rewrite_rules="        rewrite:
+          \"(.*)\": \"${REGISTRY_PATH}/\$1\""
+    fi
+
     cat <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -505,12 +539,15 @@ data:
       docker.io:
         endpoint:
           - "https://${PRIVATE_REGISTRY}"
+${rewrite_rules}
       ghcr.io:
         endpoint:
           - "https://${PRIVATE_REGISTRY}"
+${rewrite_rules}
       registry.k8s.io:
         endpoint:
           - "https://${PRIVATE_REGISTRY}"
+${rewrite_rules}
     configs:
       "${PRIVATE_REGISTRY}":
 ${tls_config}

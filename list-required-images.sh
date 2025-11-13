@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default values
 TARGET_REGISTRY=""
+REGISTRY_PATH=""  # Optional path prefix (e.g., "docker-sandbox/jmann")
 K3S_VERSION="v1.31.5-k3s1"
 K3D_VERSION="v5.8.3"
 DOCKER_VERSION="27-dind"
@@ -73,6 +74,10 @@ parse_args() {
                 TARGET_REGISTRY="$2"
                 shift 2
                 ;;
+            --registry-path)
+                REGISTRY_PATH="$2"
+                shift 2
+                ;;
             --k3s-version)
                 K3S_VERSION="$2"
                 shift 2
@@ -118,6 +123,8 @@ Required:
   --registry URL          Target registry URL (e.g., docker.local, myregistry.com:5000)
 
 Optional:
+  --registry-path PATH    Path prefix within registry (e.g., "docker-sandbox/jmann")
+                          Results in: registry/path/image-name:tag
   --k3s-version VERSION   K3s version (default: ${K3S_VERSION})
   --k3d-version VERSION   K3d version (default: ${K3D_VERSION})
   --docker-version VER    Docker version (default: ${DOCKER_VERSION})
@@ -132,9 +139,13 @@ Examples:
   # Generate image list for docker.local registry
   $0 --registry docker.local
 
+  # With custom path prefix (for Artifactory/Nexus with subdirectories)
+  $0 --registry artifactory.company.com \\
+    --registry-path docker-sandbox/jmann
+
   # Custom versions
-  $0 --registry myregistry.com:5000 \
-    --k3s-version v1.30.0-k3s1 \
+  $0 --registry myregistry.com:5000 \\
+    --k3s-version v1.30.0-k3s1 \\
     --k3d-version v5.7.4
 
   # Output to custom file
@@ -153,6 +164,7 @@ validate_config() {
 
     debug "Configuration validated:"
     debug "  Target Registry: $TARGET_REGISTRY"
+    debug "  Registry Path: ${REGISTRY_PATH:-<none>}"
     debug "  K3s Version: $K3S_VERSION"
     debug "  K3d Version: $K3D_VERSION"
     debug "  Docker Version: $DOCKER_VERSION"
@@ -265,7 +277,13 @@ add_image() {
         fi
 
         # Generate target image path preserving structure
-        local target="${TARGET_REGISTRY}/${path_component}:${tag}"
+        # If REGISTRY_PATH is set, prepend it
+        local target
+        if [[ -n "$REGISTRY_PATH" ]]; then
+            target="${TARGET_REGISTRY}/${REGISTRY_PATH}/${path_component}:${tag}"
+        else
+            target="${TARGET_REGISTRY}/${path_component}:${tag}"
+        fi
 
         echo "${source}=${target}" >> "$output"
     else
