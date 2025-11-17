@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default values
 TARGET_REGISTRY=""
 REGISTRY_PATH=""  # Optional path prefix (e.g., "docker-sandbox/jmann")
-K3S_VERSION="v1.31.5-k3s1"
+K3S_VERSION="v1.32.9+k3s1"
 K3D_VERSION="v5.8.3"
 DOCKER_VERSION="27-dind"
 OUTPUT_FILE="required-images.txt"
@@ -184,18 +184,27 @@ generate_image_list() {
     # Infrastructure Images
     log "Adding infrastructure images..."
 
+    # Normalize version formats for Docker image tags
+    # K3d images use versions without "v" prefix (e.g., 5.8.3 not v5.8.3)
+    local K3D_IMAGE_VERSION="${K3D_VERSION#v}"
+    # K3s images use dash instead of plus (e.g., v1.32.9-k3s1 not v1.32.9+k3s1)
+    local K3S_IMAGE_VERSION="${K3S_VERSION//+/-}"
+
+    debug "K3D version for images: $K3D_IMAGE_VERSION (from $K3D_VERSION)"
+    debug "K3S version for images: $K3S_IMAGE_VERSION (from $K3S_VERSION)"
+
     # Docker-in-Docker
     add_image "docker" "docker:${DOCKER_VERSION}" "$temp_file"
 
     # K3d CLI tool
-    add_image "ghcr.io/k3d-io/k3d" "ghcr.io/k3d-io/k3d:${K3D_VERSION}" "$temp_file"
+    add_image "ghcr.io/k3d-io/k3d" "ghcr.io/k3d-io/k3d:${K3D_IMAGE_VERSION}" "$temp_file"
 
     # K3s server
-    add_image "rancher/k3s" "rancher/k3s:${K3S_VERSION}" "$temp_file"
+    add_image "rancher/k3s" "rancher/k3s:${K3S_IMAGE_VERSION}" "$temp_file"
 
     # K3d helper containers (proxy, tools, registry)
-    add_image "ghcr.io/k3d-io/k3d-proxy" "ghcr.io/k3d-io/k3d-proxy:${K3D_VERSION}" "$temp_file"
-    add_image "ghcr.io/k3d-io/k3d-tools" "ghcr.io/k3d-io/k3d-tools:${K3D_VERSION}" "$temp_file"
+    add_image "ghcr.io/k3d-io/k3d-proxy" "ghcr.io/k3d-io/k3d-proxy:${K3D_IMAGE_VERSION}" "$temp_file"
+    add_image "ghcr.io/k3d-io/k3d-tools" "ghcr.io/k3d-io/k3d-tools:${K3D_IMAGE_VERSION}" "$temp_file"
 
     # K3s Internal Components
     log "Adding k3s internal component images..."

@@ -22,7 +22,7 @@ KUBECONFIGS_DIR="${SCRIPT_DIR}/kubeconfigs"
 # Default values
 INSTANCE_NAME=""
 NAMESPACE=""
-K3S_VERSION="v1.31.5-k3s1"
+K3S_VERSION="v1.32.9+k3s1"
 STORAGE_SIZE="10Gi"
 STORAGE_CLASS=""
 ACCESS_METHOD="nodeport"
@@ -48,7 +48,7 @@ REGISTRY_INSECURE=false        # Allow insecure (HTTP) registry
 # Image versions (used with or without private registry)
 DOCKER_VERSION="27-dind"
 K3D_VERSION="v5.8.3"
-K3D_TOOLS_VERSION="v5.8.3"
+K3D_TOOLS_VERSION="5.8.3"
 
 # Legacy image override support (deprecated - use private registry instead)
 DIND_IMAGE=""
@@ -395,6 +395,14 @@ validate_config() {
 }
 
 resolve_images() {
+    # Normalize version formats for Docker image tags
+    # K3d images use versions without "v" prefix (e.g., 5.8.3 not v5.8.3)
+    local K3D_IMAGE_VERSION="${K3D_VERSION#v}"
+    # K3d tools also use version without "v" prefix
+    local K3D_TOOLS_IMAGE_VERSION="${K3D_TOOLS_VERSION#v}"
+    # K3s images use dash instead of plus (e.g., v1.32.9-k3s1 not v1.32.9+k3s1)
+    local K3S_IMAGE_VERSION="${K3S_VERSION//+/-}"
+
     # Resolve final image references based on private registry or legacy overrides
 
     # Docker-in-Docker image
@@ -416,28 +424,28 @@ resolve_images() {
     if [[ -n "$K3D_IMAGE" ]]; then
         RESOLVED_K3D_IMAGE="$K3D_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
-        # ghcr.io/k3d-io/k3d:v5.8.3 -> registry/k3d-io/k3d:v5.8.3
+        # ghcr.io/k3d-io/k3d:5.8.3 -> registry/k3d-io/k3d:5.8.3
         if [[ -n "$REGISTRY_PATH" ]]; then
-            RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/k3d-io/k3d:${K3D_VERSION}"
+            RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/k3d-io/k3d:${K3D_IMAGE_VERSION}"
         else
-            RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d:${K3D_VERSION}"
+            RESOLVED_K3D_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d:${K3D_IMAGE_VERSION}"
         fi
     else
-        RESOLVED_K3D_IMAGE="ghcr.io/k3d-io/k3d:${K3D_VERSION}"
+        RESOLVED_K3D_IMAGE="ghcr.io/k3d-io/k3d:${K3D_IMAGE_VERSION}"
     fi
 
     # K3s server image
     if [[ -n "$K3S_IMAGE" ]]; then
         RESOLVED_K3S_IMAGE="$K3S_IMAGE"
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
-        # rancher/k3s:v1.31.5-k3s1 -> registry/rancher/k3s:v1.31.5-k3s1
+        # rancher/k3s:v1.32.9-k3s1 -> registry/rancher/k3s:v1.32.9-k3s1
         if [[ -n "$REGISTRY_PATH" ]]; then
-            RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/rancher/k3s:${K3S_VERSION}"
+            RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/rancher/k3s:${K3S_IMAGE_VERSION}"
         else
-            RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/rancher/k3s:${K3S_VERSION}"
+            RESOLVED_K3S_IMAGE="${PRIVATE_REGISTRY}/rancher/k3s:${K3S_IMAGE_VERSION}"
         fi
     else
-        RESOLVED_K3S_IMAGE="rancher/k3s:${K3S_VERSION}"
+        RESOLVED_K3S_IMAGE="rancher/k3s:${K3S_IMAGE_VERSION}"
     fi
 
     # K3d tools/helper image
@@ -446,12 +454,12 @@ resolve_images() {
     elif [[ -n "$PRIVATE_REGISTRY" ]]; then
         # ghcr.io/k3d-io/k3d-tools:5.8.3 -> registry/k3d-io/k3d-tools:5.8.3
         if [[ -n "$REGISTRY_PATH" ]]; then
-            RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+            RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/${REGISTRY_PATH}/k3d-io/k3d-tools:${K3D_TOOLS_IMAGE_VERSION}"
         else
-            RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+            RESOLVED_K3D_TOOLS_IMAGE="${PRIVATE_REGISTRY}/k3d-io/k3d-tools:${K3D_TOOLS_IMAGE_VERSION}"
         fi
     else
-        RESOLVED_K3D_TOOLS_IMAGE="ghcr.io/k3d-io/k3d-tools:${K3D_TOOLS_VERSION}"
+        RESOLVED_K3D_TOOLS_IMAGE="ghcr.io/k3d-io/k3d-tools:${K3D_TOOLS_IMAGE_VERSION}"
     fi
 
     debug "Resolved images:"
@@ -675,7 +683,7 @@ EOF
 
     cat <<EOF
       - name: k3d
-        image: ${RESOLVED_K3D_IMAGE}
+        image: ${RESOLVED_DIND_IMAGE}
         command:
           - /bin/sh
           - -c
@@ -695,9 +703,10 @@ EOF
               echo "ERROR: Docker failed to start"
               exit 1
             fi
+
 EOF
 
-    # Add docker credentials setup if private registry is configured with secret
+    # Add docker credentials setup if private registry is configured with secret (BEFORE extracting k3d binary)
     if [[ -n "$PRIVATE_REGISTRY" && -n "$REGISTRY_SECRET" ]]; then
         cat <<EOF
 
@@ -725,13 +734,61 @@ EOF
               fi
 
               echo "All images pre-pulled successfully"
-
-              # Copy registries.yaml to writable location for k3d volume mount
-              echo "Copying registries.yaml to /tmp for k3d..."
-              cp /etc/rancher/k3s/registries.yaml /tmp/registries.yaml
-              chmod 644 /tmp/registries.yaml
             else
               echo "WARNING: Registry secret not found at /tmp/docker-secret/config.json"
+            fi
+
+            # Extract k3d binary from k3d image (after credentials are configured)
+            echo "Extracting k3d binary from ${RESOLVED_K3D_IMAGE}..."
+            CONTAINER_ID=\$(docker create ${RESOLVED_K3D_IMAGE})
+            docker cp \$CONTAINER_ID:/bin/k3d /usr/local/bin/k3d
+            docker rm \$CONTAINER_ID
+            chmod +x /usr/local/bin/k3d
+            echo "k3d binary extracted successfully"
+
+            # Extract kubectl binary from k3d-tools image (needed for readiness probe)
+            echo "Extracting kubectl binary from ${RESOLVED_K3D_TOOLS_IMAGE}..."
+            CONTAINER_ID=\$(docker create ${RESOLVED_K3D_TOOLS_IMAGE})
+            docker cp \$CONTAINER_ID:/bin/kubectl /usr/local/bin/kubectl
+            docker rm \$CONTAINER_ID
+            chmod +x /usr/local/bin/kubectl
+            echo "kubectl binary extracted successfully"
+EOF
+    else
+        # No private registry credentials, extract k3d binary directly
+        cat <<EOF
+
+            # Extract k3d binary from k3d image
+            echo "Extracting k3d binary from ${RESOLVED_K3D_IMAGE}..."
+            CONTAINER_ID=\$(docker create ${RESOLVED_K3D_IMAGE})
+            docker cp \$CONTAINER_ID:/bin/k3d /usr/local/bin/k3d
+            docker rm \$CONTAINER_ID
+            chmod +x /usr/local/bin/k3d
+            echo "k3d binary extracted successfully"
+
+            # Extract kubectl binary from k3d-tools image (needed for readiness probe)
+            echo "Extracting kubectl binary from ${RESOLVED_K3D_TOOLS_IMAGE}..."
+            CONTAINER_ID=\$(docker create ${RESOLVED_K3D_TOOLS_IMAGE})
+            docker cp \$CONTAINER_ID:/bin/kubectl /usr/local/bin/kubectl
+            docker rm \$CONTAINER_ID
+            chmod +x /usr/local/bin/kubectl
+            echo "kubectl binary extracted successfully"
+EOF
+    fi
+
+    # Copy registries.yaml to writable location for k3d (always needed when using private registry)
+    if [[ -n "$PRIVATE_REGISTRY" ]]; then
+        cat <<EOF
+
+            # Copy registries.yaml to writable location for k3d volume mount
+            echo "Copying registries.yaml to /tmp for k3d..."
+            if [ -f /etc/rancher/k3s/registries.yaml ]; then
+              cp /etc/rancher/k3s/registries.yaml /tmp/registries.yaml
+              chmod 644 /tmp/registries.yaml
+              echo "Registry configuration copied successfully"
+            else
+              echo "ERROR: Registry configuration not found at /etc/rancher/k3s/registries.yaml"
+              exit 1
             fi
 EOF
     fi

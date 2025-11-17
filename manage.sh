@@ -258,6 +258,12 @@ cmd_logs() {
 cmd_exec() {
     local instance_name="${1:-}"
     shift || true
+    
+    # Remove the "--" separator if present
+    if [[ "${1:-}" == "--" ]]; then
+        shift
+    fi
+    
     local cmd_args=("$@")
 
     if [[ -z "$instance_name" ]]; then

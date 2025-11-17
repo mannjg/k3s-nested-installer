@@ -1,0 +1,180 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Shellcheck Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      
+      - name: Run shellcheck on all scripts
+        run: |
+          echo "Running shellcheck on all .sh files..."
+          find . -name "*.sh" -type f | while read -r file; do
+            echo "Checking: $file"
+            shellcheck "$file" || exit 1
+          done
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Make test scripts executable
+        run: chmod +x tests/*.sh
+      
+      - name: Run registry configuration tests
+        run: ./tests/test-registry-config.sh
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            reports/*.txt
+            reports/*.log
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: test-cluster
+          wait: 120s
+      
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+      
+      - name: Make scripts executable
+        run: |
+          chmod +x install.sh manage.sh tests/*.sh
+      
+      - name: Run integration tests
+        env:
+          RUN_INTEGRATION_TESTS: "true"
+        run: ./tests/test-registry-config.sh
+      
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Kubernetes Pods ==="
+          kubectl get pods --all-namespaces
+          echo ""
+          echo "=== Recent Events ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp' | tail -50
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs
+          path: |
+            *.log
+            reports/
+
+  dry-run-tests:
+    name: Dry Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Make scripts executable
+        run: chmod +x install.sh manage.sh
+      
+      - name: Test basic dry-run
+        run: ./install.sh --name test --dry-run > /dev/null
+      
+      - name: Test with private registry (no auth)
+        run: |
+          ./install.sh --name test \
+            --private-registry docker.local \
+            --dry-run > /tmp/manifest-no-auth.yaml
+          
+          # Verify critical elements exist
+          grep -q "kind: ConfigMap" /tmp/manifest-no-auth.yaml
+          grep -q "registries.yaml:" /tmp/manifest-no-auth.yaml
+          grep -q "cp /etc/rancher/k3s/registries.yaml /tmp/registries.yaml" /tmp/manifest-no-auth.yaml
+          grep -q -- "--registry-config /tmp/registries.yaml" /tmp/manifest-no-auth.yaml
+          
+          echo "✓ Private registry (no auth) manifest validated"
+      
+      - name: Test with private registry (with auth)
+        run: |
+          ./install.sh --name test \
+            --private-registry docker.local \
+            --registry-secret my-secret \
+            --dry-run > /tmp/manifest-with-auth.yaml
+          
+          # Verify auth-specific elements
+          grep -q "imagePullSecrets:" /tmp/manifest-with-auth.yaml
+          grep -q "Setting up Docker registry credentials" /tmp/manifest-with-auth.yaml
+          grep -q "cp /etc/rancher/k3s/registries.yaml /tmp/registries.yaml" /tmp/manifest-with-auth.yaml
+          
+          echo "✓ Private registry (with auth) manifest validated"
+      
+      - name: Test with registry path prefix
+        run: |
+          ./install.sh --name test \
+            --private-registry artifactory.company.com \
+            --registry-path docker-sandbox/team \
+            --dry-run > /tmp/manifest-path-prefix.yaml
+          
+          # Verify path prefix in rewrite rules
+          grep -q "rewrite:" /tmp/manifest-path-prefix.yaml
+          grep -q "docker-sandbox/team" /tmp/manifest-path-prefix.yaml
+          
+          echo "✓ Registry path prefix manifest validated"
+      
+      - name: Upload manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-manifests
+          path: /tmp/manifest-*.yaml
+
+  all-tests-passed:
+    name: All Tests Passed
+    runs-on: ubuntu-latest
+    needs: [lint, unit-tests, integration-tests, dry-run-tests]
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests.result }}" != "success" ] || \
+             [ "${{ needs.dry-run-tests.result }}" != "success" ]; then
+            echo "Some tests failed!"
+            exit 1
+          fi
+          
+          # Integration tests may be skipped
+          if [ "${{ needs.integration-tests.result }}" != "success" ] && \
+             [ "${{ needs.integration-tests.result }}" != "skipped" ]; then
+            echo "Integration tests failed!"
+            exit 1
+          fi
+          
+          echo "All required tests passed!"

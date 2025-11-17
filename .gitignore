@@ -6,3 +6,9 @@ buildkitd.toml
 
 # Serena AI assistant
 .serena/
+
+# Mirror script output files
+mirrored-images-*.txt
+
+# DNS backup files
+auxiliary/dns/backups/
