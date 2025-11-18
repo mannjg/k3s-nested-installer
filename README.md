@@ -87,9 +87,14 @@ That's it! You now have a fully functional k3s cluster.
 
 ## Documentation
 
-- **[IMPLEMENTATION.md](IMPLEMENTATION.md)** - Complete step-by-step implementation guide
-- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Common issues and solutions
-- **[examples/](examples/)** - Configuration examples for different scenarios
+| Document | Purpose |
+|----------|---------|
+| **[IMPLEMENTATION.md](IMPLEMENTATION.md)** | Complete step-by-step implementation guide |
+| **[REGISTRY.md](REGISTRY.md)** | Private registry and airgap deployment |
+| **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** | Common issues and solutions |
+| **[TESTING.md](TESTING.md)** | Test procedures and validation |
+| **[claude.md](claude.md)** | Technical architecture reference (for developers) |
+| **[examples/](examples/)** | Configuration examples for different scenarios |
 
 ## Usage
 
@@ -382,7 +387,7 @@ curl -k https://localhost:30443/version
 kubectl get svc -n k3s-dev
 ```
 
-See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for complete troubleshooting guide.
+See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for complete troubleshooting guide. For private registry/airgap issues, see **[REGISTRY.md](REGISTRY.md)**.
 
 ## Platform-Specific Notes
 

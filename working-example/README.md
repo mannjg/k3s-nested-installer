@@ -124,3 +124,10 @@ kubectl delete namespace k3s-inner
 ```
 
 Note: This will delete all resources in the k3s-inner namespace, including the inner k3s cluster.
+
+## More Information
+
+For complete documentation, see the parent directory:
+- **[../README.md](../README.md)** - Project overview
+- **[../IMPLEMENTATION.md](../IMPLEMENTATION.md)** - Full implementation guide
+- **[../TROUBLESHOOTING.md](../TROUBLESHOOTING.md)** - Common issues and solutions
