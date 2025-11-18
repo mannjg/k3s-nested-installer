@@ -43,7 +43,14 @@ WAIT_TIMEOUT=300
 PRIVATE_REGISTRY=""           # Private registry URL (e.g., docker.local)
 REGISTRY_PATH=""              # Optional path prefix (e.g., "docker-sandbox/jmann")
 REGISTRY_SECRET=""             # K8s secret name for registry auth
+REGISTRY_SECRET_NAMESPACE=""   # Source namespace for registry secret (default: current namespace)
+REGISTRY_USERNAME_KEY=""       # Key name for username in secret (for non-dockerconfigjson secrets)
+REGISTRY_PASSWORD_KEY=""       # Key name for password in secret (for non-dockerconfigjson secrets)
 REGISTRY_INSECURE=false        # Allow insecure (HTTP) registry
+
+# Extracted credentials (populated by validate_registry_credentials)
+EXTRACTED_REGISTRY_USERNAME=""
+EXTRACTED_REGISTRY_PASSWORD=""
 
 # Image versions (used with or without private registry)
 DOCKER_VERSION="27-dind"
@@ -213,6 +220,18 @@ parse_args() {
                 REGISTRY_SECRET="$2"
                 shift 2
                 ;;
+            --registry-secret-namespace)
+                REGISTRY_SECRET_NAMESPACE="$2"
+                shift 2
+                ;;
+            --registry-username-key)
+                REGISTRY_USERNAME_KEY="$2"
+                shift 2
+                ;;
+            --registry-password-key)
+                REGISTRY_PASSWORD_KEY="$2"
+                shift 2
+                ;;
             --registry-insecure)
                 REGISTRY_INSECURE=true
                 shift
@@ -278,8 +297,16 @@ Private Registry (for airgapped environments):
   --registry-path PATH      Path prefix within registry (e.g., "docker-sandbox/jmann")
                             Results in: registry/path/image-name:tag
   --registry-secret NAME    K8s secret name for registry authentication
-                            Create with: kubectl create secret docker-registry <name> ...
+  --registry-secret-namespace NS  Source namespace for the secret (default: current namespace)
+  --registry-username-key KEY     Key name for username in secret (for generic secrets)
+  --registry-password-key KEY     Key name for password in secret (for generic secrets)
   --registry-insecure       Allow insecure (HTTP) registry connections
+
+  Secret formats supported:
+    1. Docker registry secret (kubernetes.io/dockerconfigjson) - default
+       kubectl create secret docker-registry <name> --docker-server=... --docker-username=... --docker-password=...
+    2. Generic secret with username/password keys
+       Use --registry-username-key and --registry-password-key to specify key names
 
 Custom Images (legacy - prefer --private-registry):
   --dind-image IMAGE        Docker-in-Docker image override
@@ -468,85 +495,149 @@ Then run the install with:
         return 0
     fi
 
-    # Check if the K8s secret exists
-    log "Checking for Kubernetes secret: $REGISTRY_SECRET"
-    if ! kubectl get secret "$REGISTRY_SECRET" &> /dev/null; then
-        fatal "Registry secret '$REGISTRY_SECRET' not found in the current namespace.
+    # Determine source namespace for the secret
+    local secret_namespace="${REGISTRY_SECRET_NAMESPACE:-}"
+    local kubectl_ns_arg=""
+    if [[ -n "$secret_namespace" ]]; then
+        kubectl_ns_arg="-n $secret_namespace"
+        log "Checking for Kubernetes secret: $REGISTRY_SECRET in namespace: $secret_namespace"
+    else
+        log "Checking for Kubernetes secret: $REGISTRY_SECRET in current namespace"
+    fi
 
-Please create the secret first using:
-  kubectl create secret docker-registry $REGISTRY_SECRET \\
-    --docker-server=$PRIVATE_REGISTRY \\
-    --docker-username=<username> \\
+    # Check if the K8s secret exists
+    if ! kubectl get secret "$REGISTRY_SECRET" $kubectl_ns_arg &> /dev/null; then
+        local ns_msg=""
+        if [[ -n "$secret_namespace" ]]; then
+            ns_msg=" in namespace '$secret_namespace'"
+        else
+            ns_msg=" in the current namespace"
+        fi
+        fatal "Registry secret '$REGISTRY_SECRET' not found$ns_msg.
+
+Please create the secret first or specify --registry-secret-namespace if it exists in another namespace.
+
+For docker-registry type secret:
+  kubectl create secret docker-registry $REGISTRY_SECRET \
+    --docker-server=$PRIVATE_REGISTRY \
+    --docker-username=<username> \
     --docker-password=<password>
 
-Or if the secret exists in a different namespace, copy it to the current namespace."
+For generic secret with username/password keys:
+  kubectl create secret generic $REGISTRY_SECRET \
+    --from-literal=<username-key>=<username> \
+    --from-literal=<password-key>=<password>
+  Then use --registry-username-key and --registry-password-key"
     fi
 
     # Extract credentials from the K8s secret
     log "Extracting credentials from secret..."
-    local dockerconfigjson
-    dockerconfigjson=$(kubectl get secret "$REGISTRY_SECRET" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null)
+    
+    local username=""
+    local password=""
+    
+    # Check if username/password keys are specified (generic secret format)
+    if [[ -n "$REGISTRY_USERNAME_KEY" && -n "$REGISTRY_PASSWORD_KEY" ]]; then
+        log "Using generic secret format with keys: $REGISTRY_USERNAME_KEY / $REGISTRY_PASSWORD_KEY"
+        
+        # Extract username
+        local encoded_username
+        encoded_username=$(kubectl get secret "$REGISTRY_SECRET" $kubectl_ns_arg -o jsonpath="{.data.$REGISTRY_USERNAME_KEY}" 2>/dev/null)
+        if [[ -z "$encoded_username" ]]; then
+            fatal "Secret '$REGISTRY_SECRET' does not contain key '$REGISTRY_USERNAME_KEY'.
 
-    if [[ -z "$dockerconfigjson" ]]; then
-        fatal "Secret '$REGISTRY_SECRET' does not contain .dockerconfigjson data.
+Please verify the secret contains the specified username key."
+        fi
+        username=$(echo "$encoded_username" | base64 -d 2>/dev/null)
+        
+        # Extract password
+        local encoded_password
+        encoded_password=$(kubectl get secret "$REGISTRY_SECRET" $kubectl_ns_arg -o jsonpath="{.data.$REGISTRY_PASSWORD_KEY}" 2>/dev/null)
+        if [[ -z "$encoded_password" ]]; then
+            fatal "Secret '$REGISTRY_SECRET' does not contain key '$REGISTRY_PASSWORD_KEY'.
 
-The secret must be of type kubernetes.io/dockerconfigjson.
-Create it using:
-  kubectl create secret docker-registry $REGISTRY_SECRET \\
-    --docker-server=$PRIVATE_REGISTRY \\
-    --docker-username=<username> \\
-    --docker-password=<password>"
-    fi
+Please verify the secret contains the specified password key."
+        fi
+        password=$(echo "$encoded_password" | base64 -d 2>/dev/null)
+        
+    else
+        # Try docker-registry secret format (kubernetes.io/dockerconfigjson)
+        local dockerconfigjson
+        dockerconfigjson=$(kubectl get secret "$REGISTRY_SECRET" $kubectl_ns_arg -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null)
 
-    # Decode the dockerconfigjson
-    local decoded_config
-    decoded_config=$(echo "$dockerconfigjson" | base64 -d 2>/dev/null)
+        if [[ -z "$dockerconfigjson" ]]; then
+            # Check if this might be a generic secret that needs key specification
+            local secret_keys
+            secret_keys=$(kubectl get secret "$REGISTRY_SECRET" $kubectl_ns_arg -o jsonpath='{.data}' 2>/dev/null | jq -r 'keys[]' 2>/dev/null | tr '
+' ', ' | sed 's/,$//')
+            
+            fatal "Secret '$REGISTRY_SECRET' does not contain .dockerconfigjson data.
 
-    if [[ -z "$decoded_config" ]]; then
-        fatal "Failed to decode .dockerconfigjson from secret '$REGISTRY_SECRET'"
-    fi
+Available keys in secret: $secret_keys
 
-    # Extract registry URL from the secret to find the right auth entry
-    # The secret may have auth for docker.io, or the specific registry
-    local registry_url="$PRIVATE_REGISTRY"
+If this is a docker-registry type secret, recreate it using:
+  kubectl create secret docker-registry $REGISTRY_SECRET \
+    --docker-server=$PRIVATE_REGISTRY \
+    --docker-username=<username> \
+    --docker-password=<password>
 
-    # Try to get auth for the specific registry
-    local auth_entry
-    auth_entry=$(echo "$decoded_config" | jq -r ".auths[\"$registry_url\"].auth // .auths[\"https://$registry_url\"].auth // .auths[\"http://$registry_url\"].auth // empty" 2>/dev/null)
+If this is a generic secret with username/password keys, specify the key names:
+  --registry-username-key <key-name> --registry-password-key <key-name>"
+        fi
 
-    # If no direct match, try common variations
-    if [[ -z "$auth_entry" ]]; then
-        # Try without port
-        local registry_host="${registry_url%%:*}"
-        auth_entry=$(echo "$decoded_config" | jq -r ".auths[\"$registry_host\"].auth // empty" 2>/dev/null)
-    fi
+        # Decode the dockerconfigjson
+        local decoded_config
+        decoded_config=$(echo "$dockerconfigjson" | base64 -d 2>/dev/null)
 
-    # If still no match, get the first auth entry
-    if [[ -z "$auth_entry" ]]; then
-        auth_entry=$(echo "$decoded_config" | jq -r '.auths | to_entries | .[0].value.auth // empty' 2>/dev/null)
-    fi
+        if [[ -z "$decoded_config" ]]; then
+            fatal "Failed to decode .dockerconfigjson from secret '$REGISTRY_SECRET'"
+        fi
 
-    if [[ -z "$auth_entry" ]]; then
-        fatal "Could not extract authentication credentials from secret '$REGISTRY_SECRET'.
+        # Extract registry URL from the secret to find the right auth entry
+        local registry_url="$PRIVATE_REGISTRY"
+
+        # Try to get auth for the specific registry
+        local auth_entry
+        auth_entry=$(echo "$decoded_config" | jq -r ".auths[\"$registry_url\"].auth // .auths[\"https://$registry_url\"].auth // .auths[\"http://$registry_url\"].auth // empty" 2>/dev/null)
+
+        # If no direct match, try common variations
+        if [[ -z "$auth_entry" ]]; then
+            # Try without port
+            local registry_host="${registry_url%%:*}"
+            auth_entry=$(echo "$decoded_config" | jq -r ".auths[\"$registry_host\"].auth // empty" 2>/dev/null)
+        fi
+
+        # If still no match, get the first auth entry
+        if [[ -z "$auth_entry" ]]; then
+            auth_entry=$(echo "$decoded_config" | jq -r '.auths | to_entries | .[0].value.auth // empty' 2>/dev/null)
+        fi
+
+        if [[ -z "$auth_entry" ]]; then
+            fatal "Could not extract authentication credentials from secret '$REGISTRY_SECRET'.
 
 The secret must contain valid Docker registry credentials.
 Please recreate the secret with:
-  kubectl create secret docker-registry $REGISTRY_SECRET \\
-    --docker-server=$PRIVATE_REGISTRY \\
-    --docker-username=<username> \\
+  kubectl create secret docker-registry $REGISTRY_SECRET \
+    --docker-server=$PRIVATE_REGISTRY \
+    --docker-username=<username> \
     --docker-password=<password>"
+        fi
+
+        # Decode auth entry (base64 encoded username:password)
+        local credentials
+        credentials=$(echo "$auth_entry" | base64 -d 2>/dev/null)
+
+        if [[ -z "$credentials" || ! "$credentials" =~ : ]]; then
+            fatal "Invalid credentials format in secret '$REGISTRY_SECRET'"
+        fi
+
+        username="${credentials%%:*}"
+        password="${credentials#*:}"
     fi
-
-    # Decode auth entry (base64 encoded username:password)
-    local credentials
-    credentials=$(echo "$auth_entry" | base64 -d 2>/dev/null)
-
-    if [[ -z "$credentials" || ! "$credentials" =~ : ]]; then
-        fatal "Invalid credentials format in secret '$REGISTRY_SECRET'"
-    fi
-
-    local username="${credentials%%:*}"
-    local password="${credentials#*:}"
+    
+    # Store credentials in global variables for later use
+    EXTRACTED_REGISTRY_USERNAME="$username"
+    EXTRACTED_REGISTRY_PASSWORD="$password"
 
     # Test Docker login to the registry
     log "Testing Docker login to $PRIVATE_REGISTRY..."
@@ -563,7 +654,7 @@ Please recreate the secret with:
     fi
 
     # Attempt docker login
-    login_output=$(echo "$password" | docker login "$login_registry" -u "$username" --password-stdin 2>&1)
+    login_output=$(echo "$EXTRACTED_REGISTRY_PASSWORD" | docker login "$login_registry" -u "$EXTRACTED_REGISTRY_USERNAME" --password-stdin 2>&1)
     login_result=$?
 
     if [[ $login_result -ne 0 ]]; then
@@ -618,7 +709,7 @@ Please check your registry credentials and connectivity."
     docker logout "$login_registry" &> /dev/null || true
 
     log "Registry credential validation successful"
-    debug "Successfully authenticated to $PRIVATE_REGISTRY as $username"
+    debug "Successfully authenticated to $PRIVATE_REGISTRY as $EXTRACTED_REGISTRY_USERNAME"
 }
 
 resolve_images() {
@@ -1315,21 +1406,24 @@ deploy_instance() {
 
     rm "$manifest_file"
 
-    # Copy registry secret if using private registry
-    if [[ -n "$REGISTRY_SECRET" ]]; then
-        log "Copying registry secret from 'default' namespace to '$NAMESPACE'..."
-        if kubectl get secret "$REGISTRY_SECRET" -n default >/dev/null 2>&1; then
-            kubectl get secret "$REGISTRY_SECRET" -n default -o json | \
-                jq "del(.metadata.namespace, .metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .metadata.selfLink)" | \
-                kubectl apply -n "$NAMESPACE" -f - >/dev/null
-
-            if [[ $? -eq 0 ]]; then
-                success "Registry secret copied successfully"
-            else
-                warn "Failed to copy registry secret - deployment may fail to pull images"
-            fi
+    # Create registry secret if using private registry with credentials
+    if [[ -n "$REGISTRY_SECRET" && -n "$EXTRACTED_REGISTRY_USERNAME" && -n "$EXTRACTED_REGISTRY_PASSWORD" ]]; then
+        log "Creating registry secret '$REGISTRY_SECRET' in namespace '$NAMESPACE'..."
+        
+        # Delete existing secret if present (to ensure fresh credentials)
+        kubectl delete secret "$REGISTRY_SECRET" -n "$NAMESPACE" 2>/dev/null || true
+        
+        # Create a new docker-registry secret using the extracted credentials
+        # This works regardless of whether the source was dockerconfigjson or generic secret
+        if kubectl create secret docker-registry "$REGISTRY_SECRET" \
+            -n "$NAMESPACE" \
+            --docker-server="$PRIVATE_REGISTRY" \
+            --docker-username="$EXTRACTED_REGISTRY_USERNAME" \
+            --docker-password="$EXTRACTED_REGISTRY_PASSWORD" \
+            >/dev/null 2>&1; then
+            success "Registry secret created successfully"
         else
-            warn "Registry secret '$REGISTRY_SECRET' not found in default namespace"
+            warn "Failed to create registry secret - deployment may fail to pull images"
         fi
     fi
 
