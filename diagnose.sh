@@ -482,8 +482,24 @@ if [[ -z "$POD_NAME" ]]; then
 else
     subheader "Registry Connectivity from DinD"
 
-    # Get registry from config
+    # Get registry from config - try different sources
+    # First try the PRIVATE_REGISTRY key (older format)
     REGISTRY=$(kubectl get configmap -n "$NAMESPACE" -l app=k3s -o jsonpath='{.items[0].data.PRIVATE_REGISTRY}' 2>/dev/null)
+
+    # If not found, extract from registries.yaml (newer format)
+    if [[ -z "$REGISTRY" ]]; then
+        # Extract the first endpoint from registries.yaml configs section
+        REGISTRIES_YAML=$(kubectl get configmap -n "$NAMESPACE" k3s-registries -o jsonpath='{.data.registries\.yaml}' 2>/dev/null)
+        if [[ -n "$REGISTRIES_YAML" ]]; then
+            # Try to get from configs section (contains the actual registry hostname)
+            REGISTRY=$(echo "$REGISTRIES_YAML" | grep -A1 "^configs:" | grep -oP '^\s+"\K[^"]+' | head -1)
+            # If that fails, try to get from endpoint in mirrors
+            if [[ -z "$REGISTRY" ]]; then
+                REGISTRY=$(echo "$REGISTRIES_YAML" | grep -oP 'endpoint:\s*\n\s+-\s+"https?://\K[^"]+' | head -1)
+            fi
+        fi
+    fi
+
     if [[ -n "$REGISTRY" ]]; then
         check_info "Configured registry: $REGISTRY"
 
@@ -500,14 +516,83 @@ else
             check_detail "Check network policies, DNS, and firewall rules"
         fi
 
-        # Test HTTP(S) connectivity
-        CURL_RESULT=$(kubectl exec -n "$NAMESPACE" "$POD_NAME" -c k3d -- curl -s -o /dev/null -w "%{http_code}" "http://$REGISTRY/v2/" 2>/dev/null || true)
-        if [[ "$CURL_RESULT" == "200" || "$CURL_RESULT" == "401" ]]; then
-            check_pass "HTTP registry API responding (status: $CURL_RESULT)"
+        # Test HTTP(S) connectivity - try HTTPS first (handles redirects)
+        CURL_RESULT=$(kubectl exec -n "$NAMESPACE" "$POD_NAME" -c k3d -- curl -s -o /dev/null -w "%{http_code}" -k "https://$REGISTRY/v2/" 2>/dev/null || true)
+
+        # If HTTPS connection failed completely, try HTTP
+        if [[ "$CURL_RESULT" == "000" || -z "$CURL_RESULT" ]]; then
+            CURL_RESULT=$(kubectl exec -n "$NAMESPACE" "$POD_NAME" -c k3d -- curl -s -o /dev/null -w "%{http_code}" "http://$REGISTRY/v2/" 2>/dev/null || true)
+        fi
+
+        if [[ "$CURL_RESULT" == "200" ]]; then
+            check_pass "Registry API responding (status: $CURL_RESULT) - no auth required"
+        elif [[ "$CURL_RESULT" == "401" ]]; then
+            check_warn "Registry API responding but requires authentication (status: $CURL_RESULT)"
+
+            # Check if registry secret exists in namespace
+            subheader "Registry Authentication Validation"
+
+            # Look for docker-registry secrets in the namespace
+            REGISTRY_SECRETS=$(kubectl get secrets -n "$NAMESPACE" -o jsonpath='{range .items[?(@.type=="kubernetes.io/dockerconfigjson")]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+            if [[ -z "$REGISTRY_SECRETS" ]]; then
+                check_fail "No docker-registry secrets found in namespace $NAMESPACE"
+                check_detail "Registry requires authentication but no credentials are available"
+                check_detail "Create a secret with: kubectl create secret docker-registry <name> --docker-server=$REGISTRY --docker-username=<user> --docker-password=<pass> -n $NAMESPACE"
+            else
+                check_pass "Found docker-registry secret(s): $(echo $REGISTRY_SECRETS | tr '\n' ' ')"
+
+                # Try to test authentication with each secret
+                AUTH_SUCCESS=false
+                for SECRET_NAME in $REGISTRY_SECRETS; do
+                    # Extract credentials from secret
+                    DOCKER_CONFIG=$(kubectl get secret -n "$NAMESPACE" "$SECRET_NAME" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d 2>/dev/null)
+
+                    if [[ -n "$DOCKER_CONFIG" ]]; then
+                        # Extract auth for this registry (try various registry name formats)
+                        AUTH_STRING=""
+                        for REG_KEY in "$REGISTRY" "https://$REGISTRY" "http://$REGISTRY" "${REGISTRY_HOST}"; do
+                            AUTH_STRING=$(echo "$DOCKER_CONFIG" | jq -r ".auths[\"$REG_KEY\"].auth // empty" 2>/dev/null)
+                            [[ -n "$AUTH_STRING" ]] && break
+                        done
+
+                        if [[ -n "$AUTH_STRING" ]]; then
+                            check_pass "Secret '$SECRET_NAME' contains credentials for registry"
+
+                            # Test actual authentication
+                            AUTH_TEST=$(kubectl exec -n "$NAMESPACE" "$POD_NAME" -c k3d -- curl -s -o /dev/null -w "%{http_code}" -k -H "Authorization: Basic $AUTH_STRING" "https://$REGISTRY/v2/" 2>/dev/null || true)
+
+                            # If HTTPS failed, try HTTP
+                            if [[ "$AUTH_TEST" == "000" || -z "$AUTH_TEST" ]]; then
+                                AUTH_TEST=$(kubectl exec -n "$NAMESPACE" "$POD_NAME" -c k3d -- curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Basic $AUTH_STRING" "http://$REGISTRY/v2/" 2>/dev/null || true)
+                            fi
+
+                            if [[ "$AUTH_TEST" == "200" ]]; then
+                                check_pass "Authentication successful with secret '$SECRET_NAME'"
+                                AUTH_SUCCESS=true
+                                break
+                            elif [[ "$AUTH_TEST" == "401" ]]; then
+                                check_fail "Authentication failed with secret '$SECRET_NAME' (invalid credentials)"
+                            else
+                                check_warn "Could not verify authentication (status: $AUTH_TEST)"
+                            fi
+                        else
+                            check_warn "Secret '$SECRET_NAME' does not contain credentials for registry '$REGISTRY'"
+                        fi
+                    else
+                        check_warn "Could not extract docker config from secret '$SECRET_NAME'"
+                    fi
+                done
+
+                if [[ "$AUTH_SUCCESS" != "true" ]]; then
+                    check_fail "No valid registry credentials found"
+                    check_detail "Ensure a docker-registry secret with valid credentials exists for $REGISTRY"
+                fi
+            fi
         elif [[ -n "$CURL_RESULT" ]]; then
             check_warn "Registry API returned status: $CURL_RESULT"
         else
-            check_warn "Could not test HTTP registry API"
+            check_warn "Could not test registry API connectivity"
         fi
     else
         check_info "No private registry configured (using defaults)"

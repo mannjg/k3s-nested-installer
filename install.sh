@@ -394,6 +394,233 @@ validate_config() {
     debug "  Access Method: $ACCESS_METHOD"
 }
 
+validate_registry_credentials() {
+    # Skip validation if no private registry is configured
+    if [[ -z "$PRIVATE_REGISTRY" ]]; then
+        debug "No private registry configured, skipping credential validation"
+        return 0
+    fi
+
+    log "Validating private registry credentials..."
+
+    # Check if registry secret is specified
+    if [[ -z "$REGISTRY_SECRET" ]]; then
+        # No secret specified - check if registry actually requires authentication
+        log "No registry secret specified. Checking if registry requires authentication..."
+
+        # Check if Docker is currently authenticated to this registry
+        local docker_config="${HOME}/.docker/config.json"
+        local is_authenticated=false
+
+        if [[ -f "$docker_config" ]]; then
+            # Check if we have auth for this registry in Docker config
+            if jq -e ".auths[\"$PRIVATE_REGISTRY\"] // .auths[\"https://$PRIVATE_REGISTRY\"] // .auths[\"http://$PRIVATE_REGISTRY\"]" "$docker_config" &> /dev/null; then
+                is_authenticated=true
+                debug "Found existing Docker authentication for $PRIVATE_REGISTRY"
+            fi
+        fi
+
+        # Try to check if registry requires authentication
+        # We'll attempt to access the registry's v2 API
+        # Always try HTTPS first (with -k for self-signed certs) since most registries redirect HTTP to HTTPS
+        local registry_url="$PRIVATE_REGISTRY"
+        local http_code
+
+        # Try HTTPS first (handles most cases including HTTP->HTTPS redirects)
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 -k "https://$registry_url/v2/" 2>/dev/null || echo "000")
+
+        # If HTTPS connection failed completely, try HTTP
+        if [[ "$http_code" == "000" ]]; then
+            debug "HTTPS connection failed, trying HTTP..."
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "http://$registry_url/v2/" 2>/dev/null || echo "000")
+        fi
+
+        if [[ "$http_code" == "401" ]]; then
+            # Registry requires authentication
+            if [[ "$is_authenticated" == "true" ]]; then
+                log "Registry requires authentication. Using existing Docker credentials."
+                warn "NOTE: The nested K8s cluster may still need a --registry-secret for pulling images."
+                warn "Consider creating a K8s secret with your Docker credentials."
+            else
+                fatal "Registry $PRIVATE_REGISTRY requires authentication but no --registry-secret was specified.
+
+The registry returned HTTP 401 (Unauthorized), indicating authentication is required.
+
+Please create a Kubernetes secret and specify it:
+  kubectl create secret docker-registry <secret-name> \\
+    --docker-server=$PRIVATE_REGISTRY \\
+    --docker-username=<username> \\
+    --docker-password=<password>
+
+Then run the install with:
+  --registry-secret <secret-name>"
+            fi
+        elif [[ "$http_code" == "200" ]]; then
+            log "Registry appears to allow anonymous access"
+        elif [[ "$http_code" == "000" ]]; then
+            warn "Could not connect to registry at $registry_url (connection failed)"
+            warn "Cannot verify if authentication is required. Proceeding anyway..."
+        else
+            debug "Registry check returned HTTP $http_code"
+            warn "No registry secret specified. If images fail to pull with auth errors, use --registry-secret"
+        fi
+
+        return 0
+    fi
+
+    # Check if the K8s secret exists
+    log "Checking for Kubernetes secret: $REGISTRY_SECRET"
+    if ! kubectl get secret "$REGISTRY_SECRET" &> /dev/null; then
+        fatal "Registry secret '$REGISTRY_SECRET' not found in the current namespace.
+
+Please create the secret first using:
+  kubectl create secret docker-registry $REGISTRY_SECRET \\
+    --docker-server=$PRIVATE_REGISTRY \\
+    --docker-username=<username> \\
+    --docker-password=<password>
+
+Or if the secret exists in a different namespace, copy it to the current namespace."
+    fi
+
+    # Extract credentials from the K8s secret
+    log "Extracting credentials from secret..."
+    local dockerconfigjson
+    dockerconfigjson=$(kubectl get secret "$REGISTRY_SECRET" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null)
+
+    if [[ -z "$dockerconfigjson" ]]; then
+        fatal "Secret '$REGISTRY_SECRET' does not contain .dockerconfigjson data.
+
+The secret must be of type kubernetes.io/dockerconfigjson.
+Create it using:
+  kubectl create secret docker-registry $REGISTRY_SECRET \\
+    --docker-server=$PRIVATE_REGISTRY \\
+    --docker-username=<username> \\
+    --docker-password=<password>"
+    fi
+
+    # Decode the dockerconfigjson
+    local decoded_config
+    decoded_config=$(echo "$dockerconfigjson" | base64 -d 2>/dev/null)
+
+    if [[ -z "$decoded_config" ]]; then
+        fatal "Failed to decode .dockerconfigjson from secret '$REGISTRY_SECRET'"
+    fi
+
+    # Extract registry URL from the secret to find the right auth entry
+    # The secret may have auth for docker.io, or the specific registry
+    local registry_url="$PRIVATE_REGISTRY"
+
+    # Try to get auth for the specific registry
+    local auth_entry
+    auth_entry=$(echo "$decoded_config" | jq -r ".auths[\"$registry_url\"].auth // .auths[\"https://$registry_url\"].auth // .auths[\"http://$registry_url\"].auth // empty" 2>/dev/null)
+
+    # If no direct match, try common variations
+    if [[ -z "$auth_entry" ]]; then
+        # Try without port
+        local registry_host="${registry_url%%:*}"
+        auth_entry=$(echo "$decoded_config" | jq -r ".auths[\"$registry_host\"].auth // empty" 2>/dev/null)
+    fi
+
+    # If still no match, get the first auth entry
+    if [[ -z "$auth_entry" ]]; then
+        auth_entry=$(echo "$decoded_config" | jq -r '.auths | to_entries | .[0].value.auth // empty' 2>/dev/null)
+    fi
+
+    if [[ -z "$auth_entry" ]]; then
+        fatal "Could not extract authentication credentials from secret '$REGISTRY_SECRET'.
+
+The secret must contain valid Docker registry credentials.
+Please recreate the secret with:
+  kubectl create secret docker-registry $REGISTRY_SECRET \\
+    --docker-server=$PRIVATE_REGISTRY \\
+    --docker-username=<username> \\
+    --docker-password=<password>"
+    fi
+
+    # Decode auth entry (base64 encoded username:password)
+    local credentials
+    credentials=$(echo "$auth_entry" | base64 -d 2>/dev/null)
+
+    if [[ -z "$credentials" || ! "$credentials" =~ : ]]; then
+        fatal "Invalid credentials format in secret '$REGISTRY_SECRET'"
+    fi
+
+    local username="${credentials%%:*}"
+    local password="${credentials#*:}"
+
+    # Test Docker login to the registry
+    log "Testing Docker login to $PRIVATE_REGISTRY..."
+
+    local login_output
+    local login_result
+
+    # Determine protocol prefix for login
+    local login_registry="$PRIVATE_REGISTRY"
+    if [[ "$REGISTRY_INSECURE" == "true" ]]; then
+        # For insecure registries, we may need to try with explicit http://
+        # However, docker login doesn't use protocol prefixes for the server
+        debug "Insecure registry mode enabled"
+    fi
+
+    # Attempt docker login
+    login_output=$(echo "$password" | docker login "$login_registry" -u "$username" --password-stdin 2>&1)
+    login_result=$?
+
+    if [[ $login_result -ne 0 ]]; then
+        # Check for common error patterns
+        if echo "$login_output" | grep -qi "no basic auth credentials\|unauthorized\|authentication required\|denied"; then
+            fatal "Registry authentication failed for $PRIVATE_REGISTRY
+
+Error: $login_output
+
+Please verify:
+1. The username and password in secret '$REGISTRY_SECRET' are correct
+2. The registry server URL matches the secret's --docker-server value
+3. Your account has access to the required images
+
+To update the secret:
+  kubectl delete secret $REGISTRY_SECRET
+  kubectl create secret docker-registry $REGISTRY_SECRET \\
+    --docker-server=$PRIVATE_REGISTRY \\
+    --docker-username=<username> \\
+    --docker-password=<password>"
+        elif echo "$login_output" | grep -qi "certificate\|tls\|x509"; then
+            fatal "TLS/Certificate error connecting to $PRIVATE_REGISTRY
+
+Error: $login_output
+
+If this is an insecure registry, make sure to use --registry-insecure flag.
+Also ensure the Docker daemon is configured to allow insecure registries:
+  Add to /etc/docker/daemon.json:
+  {
+    \"insecure-registries\": [\"$PRIVATE_REGISTRY\"]
+  }
+  Then restart Docker: sudo systemctl restart docker"
+        elif echo "$login_output" | grep -qi "connection refused\|no such host\|timeout\|network"; then
+            fatal "Cannot connect to registry $PRIVATE_REGISTRY
+
+Error: $login_output
+
+Please verify:
+1. The registry URL is correct
+2. The registry is running and accessible from this host
+3. Network/firewall settings allow the connection"
+        else
+            fatal "Docker login to $PRIVATE_REGISTRY failed
+
+Error: $login_output
+
+Please check your registry credentials and connectivity."
+        fi
+    fi
+
+    # Clean up - logout from registry to avoid leaving credentials in docker config
+    docker logout "$login_registry" &> /dev/null || true
+
+    log "Registry credential validation successful"
+    debug "Successfully authenticated to $PRIVATE_REGISTRY as $username"
+}
+
 resolve_images() {
     # Normalize version formats for Docker image tags
     # K3d images use versions without "v" prefix (e.g., 5.8.3 not v5.8.3)
@@ -752,14 +979,6 @@ EOF
             docker rm \$CONTAINER_ID
             chmod +x /usr/local/bin/k3d
             echo "k3d binary extracted successfully"
-
-            # Extract kubectl binary from k3d-tools image (needed for readiness probe)
-            echo "Extracting kubectl binary from ${RESOLVED_K3D_TOOLS_IMAGE}..."
-            CONTAINER_ID=\$(docker create ${RESOLVED_K3D_TOOLS_IMAGE})
-            docker cp \$CONTAINER_ID:/bin/kubectl /usr/local/bin/kubectl
-            docker rm \$CONTAINER_ID
-            chmod +x /usr/local/bin/kubectl
-            echo "kubectl binary extracted successfully"
 EOF
     else
         # No private registry credentials, extract k3d binary directly
@@ -772,14 +991,6 @@ EOF
             docker rm \$CONTAINER_ID
             chmod +x /usr/local/bin/k3d
             echo "k3d binary extracted successfully"
-
-            # Extract kubectl binary from k3d-tools image (needed for readiness probe)
-            echo "Extracting kubectl binary from ${RESOLVED_K3D_TOOLS_IMAGE}..."
-            CONTAINER_ID=\$(docker create ${RESOLVED_K3D_TOOLS_IMAGE})
-            docker cp \$CONTAINER_ID:/bin/kubectl /usr/local/bin/kubectl
-            docker rm \$CONTAINER_ID
-            chmod +x /usr/local/bin/kubectl
-            echo "kubectl binary extracted successfully"
 EOF
     fi
 
@@ -1279,6 +1490,9 @@ main() {
 
     # Validate configuration
     validate_config
+
+    # Validate registry credentials early to catch auth issues before deployment
+    validate_registry_credentials
 
     # Check prerequisites
     check_prerequisites
