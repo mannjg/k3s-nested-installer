@@ -215,6 +215,12 @@ generate_image_list() {
 
     # CoreDNS (version depends on k3s/k8s version)
     case "$k8s_minor" in
+        1.32)
+            # K3s v1.32 uses rancher/mirrored-* images from docker.io
+            add_image "rancher/mirrored-coredns-coredns" "rancher/mirrored-coredns-coredns:1.12.3" "$temp_file"
+            add_image "rancher/mirrored-pause" "rancher/mirrored-pause:3.6" "$temp_file"
+            add_image "rancher/mirrored-metrics-server" "rancher/mirrored-metrics-server:v0.8.0" "$temp_file"
+            ;;
         1.31)
             # K3s v1.31 uses rancher/mirrored-* images from docker.io
             add_image "rancher/mirrored-coredns-coredns" "rancher/mirrored-coredns-coredns:1.12.0" "$temp_file"
@@ -232,15 +238,15 @@ generate_image_list() {
             add_image "registry.k8s.io/metrics-server/metrics-server" "registry.k8s.io/metrics-server/metrics-server:v0.6.4" "$temp_file"
             ;;
         *)
-            warn "Unknown Kubernetes version $k8s_minor, using v1.31 component versions"
-            add_image "rancher/mirrored-coredns-coredns" "rancher/mirrored-coredns-coredns:1.12.0" "$temp_file"
+            warn "Unknown Kubernetes version $k8s_minor, using v1.32 component versions"
+            add_image "rancher/mirrored-coredns-coredns" "rancher/mirrored-coredns-coredns:1.12.3" "$temp_file"
             add_image "rancher/mirrored-pause" "rancher/mirrored-pause:3.6" "$temp_file"
-            add_image "rancher/mirrored-metrics-server" "rancher/mirrored-metrics-server:v0.7.2" "$temp_file"
+            add_image "rancher/mirrored-metrics-server" "rancher/mirrored-metrics-server:v0.8.0" "$temp_file"
             ;;
     esac
 
     # Local path provisioner (CSI driver for local storage)
-    add_image "rancher/local-path-provisioner" "rancher/local-path-provisioner:v0.0.30" "$temp_file"
+    add_image "rancher/local-path-provisioner" "rancher/local-path-provisioner:v0.0.31" "$temp_file"
 
     # Traefik (if not disabled) - note: k3s disables it in our install.sh
     # add_image "rancher/mirrored-library-traefik" "rancher/mirrored-library-traefik:2.11.0" "$temp_file"

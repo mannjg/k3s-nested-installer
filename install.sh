@@ -519,10 +519,17 @@ generate_registries_configmap() {
         return 0
     fi
 
+    # Use HTTP for insecure registries to bypass TLS verification
+    local registry_protocol="https"
     local tls_config=""
     if [[ "$REGISTRY_INSECURE" == "true" ]]; then
-        tls_config="      tls:
-        insecure_skip_verify: true"
+        registry_protocol="http"
+        # Also need insecure_skip_verify for direct registry access (when --system-default-registry is used)
+        tls_config="        tls:
+          insecure_skip_verify: true"
+    else
+        tls_config="        tls:
+          insecure_skip_verify: false"
     fi
 
     # If REGISTRY_PATH is set, we need to use rewrite rules to prepend the path
@@ -546,15 +553,15 @@ data:
     mirrors:
       docker.io:
         endpoint:
-          - "https://${PRIVATE_REGISTRY}"
+          - "${registry_protocol}://${PRIVATE_REGISTRY}"
 ${rewrite_rules}
       ghcr.io:
         endpoint:
-          - "https://${PRIVATE_REGISTRY}"
+          - "${registry_protocol}://${PRIVATE_REGISTRY}"
 ${rewrite_rules}
       registry.k8s.io:
         endpoint:
-          - "https://${PRIVATE_REGISTRY}"
+          - "${registry_protocol}://${PRIVATE_REGISTRY}"
 ${rewrite_rules}
     configs:
       "${PRIVATE_REGISTRY}":
@@ -820,6 +827,10 @@ EOF
 
             # Add private registry configuration using k3d's native flag
             K3D_ARGS="\$K3D_ARGS --registry-config /tmp/registries.yaml"
+
+            # Use system-default-registry to make k3s prepend the private registry to all system images
+            # This is more reliable than relying on containerd mirror configuration
+            K3D_ARGS="\$K3D_ARGS --k3s-arg '--system-default-registry=${PRIVATE_REGISTRY}@server:0'"
 EOF
     fi
 
@@ -837,7 +848,7 @@ EOF
             tail -f /dev/null
         env:
         - name: DOCKER_HOST
-          value: tcp://localhost:2375
+          value: unix:///var/run/docker.sock
 EOF
 
     # Add k3d image override env vars if using private registry or custom tools image
@@ -896,7 +907,7 @@ EOF
             command:
             - sh
             - -c
-            - kubectl --kubeconfig=/output/kubeconfig.yaml get nodes 2>/dev/null | grep -q Ready
+            - docker exec k3d-${INSTANCE_NAME}-server-0 kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q Ready
           initialDelaySeconds: 90
           periodSeconds: 10
           timeoutSeconds: 5
@@ -1092,6 +1103,24 @@ deploy_instance() {
     fi
 
     rm "$manifest_file"
+
+    # Copy registry secret if using private registry
+    if [[ -n "$REGISTRY_SECRET" ]]; then
+        log "Copying registry secret from 'default' namespace to '$NAMESPACE'..."
+        if kubectl get secret "$REGISTRY_SECRET" -n default >/dev/null 2>&1; then
+            kubectl get secret "$REGISTRY_SECRET" -n default -o json | \
+                jq "del(.metadata.namespace, .metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .metadata.selfLink)" | \
+                kubectl apply -n "$NAMESPACE" -f - >/dev/null
+
+            if [[ $? -eq 0 ]]; then
+                success "Registry secret copied successfully"
+            else
+                warn "Failed to copy registry secret - deployment may fail to pull images"
+            fi
+        else
+            warn "Registry secret '$REGISTRY_SECRET' not found in default namespace"
+        fi
+    fi
 
     # Wait for pod to be ready
     wait_for_pod
